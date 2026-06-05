@@ -104,6 +104,46 @@ def vpd_kpa(t_celsius, rh_pct):
     return np.maximum(vpd, 0.0)
 
 
+def equilibrium_moisture_content(t_celsius, rh_pct):
+    """Equilibrium moisture content (%) — Simard (1968) / NFDRS, a proxy for 1-hr
+    dead-fuel moisture (LOWER = drier fuel = more flammable).
+
+    Piecewise in RH; temperature converted to °F internally. Pair with the daytime
+    extreme (t2m_max, RH_min) for the most-flammable "peak" value, mirroring VPD_peak.
+    """
+    rh = np.asarray(rh_pct, dtype="float64")
+    t_f = np.asarray(t_celsius, dtype="float64") * 9.0 / 5.0 + 32.0
+    emc = np.where(
+        rh < 10.0,
+        0.03229 + 0.281073 * rh - 0.000578 * rh * t_f,
+        np.where(
+            rh <= 50.0,
+            2.22749 + 0.160107 * rh - 0.014784 * t_f,
+            21.0606 + 0.005565 * rh ** 2 - 0.00035 * rh * t_f - 0.483199 * rh,
+        ),
+    )
+    return np.maximum(emc, 0.0)
+
+
+def fosberg_ffwi(emc_pct, wind_speed_ms):
+    """Fosberg Fire Weather Index from EMC (%) and wind speed (m/s).
+
+    Fast-reacting fire-weather index (complements the slow FWI). Higher = more
+    dangerous (dry fuel + strong wind). Unbounded-ish but typically 0–100.
+    """
+    m = np.minimum(np.asarray(emc_pct, dtype="float64"), 30.0) / 30.0  # moisture damping, capped
+    eta = 1.0 - 2.0 * m + 1.5 * m ** 2 - 0.5 * m ** 3
+    u_mph = np.asarray(wind_speed_ms, dtype="float64") * 2.236936
+    return eta * np.sqrt(1.0 + u_mph ** 2) / 0.3002
+
+
+def fractional_vegetation_cover(ndvi, ndvi_soil: float = 0.05, ndvi_veg: float = 0.86):
+    """Fractional vegetation cover [0, 1] from NDVI (Carlson & Ripley 1997)."""
+    n = np.asarray(ndvi, dtype="float64")
+    fvc = ((n - ndvi_soil) / (ndvi_veg - ndvi_soil)) ** 2
+    return np.clip(fvc, 0.0, 1.0)
+
+
 def hdw_index(vpd_kpa_value, wind_speed_ms):
     """Hot-Dry-Windy index ≈ VPD × wind speed (Srock et al. 2018).
 
@@ -170,6 +210,55 @@ def day_of_week_sincos(day_of_week, period: float = 7.0):
     """
     angle = 2.0 * np.pi * np.asarray(day_of_week) / period
     return np.sin(angle), np.cos(angle)
+
+
+# ---------------------------------------------------------------------------
+# Spatial fire-context (§E) — computed on the COARSE fire mask, post-coarsen
+# ---------------------------------------------------------------------------
+# Resolution-coupled (distance/advection only mean something at the working cell
+# size), so these live on the coarse grid, not on 1 km silver. Causal: derived
+# from is_fire(t) to predict is_fire(t+1). Both strongly favour *continuation*
+# (cells near today's fire burn tomorrow) -> read their value through the §A
+# new-ignition vs. continuation split.
+
+
+def fire_distance_and_exposure(fire_mask, wind_u, wind_v, x_coords, y_coords, no_fire_dist_km):
+    """Spatial fire-context for ONE day.
+
+    Args:
+        fire_mask: (H, W) truthy where fire on day t.
+        wind_u, wind_v: (H, W) wind components the wind blows TOWARD (m/s); NaN over sea.
+        x_coords: (W,) easting per column (m, EPSG:3035, increasing).
+        y_coords: (H,) northing per row (m; decreasing downward — handled via values).
+        no_fire_dist_km: value to fill `dist_to_fire` on days with no fire anywhere.
+
+    Returns:
+        (dist_km (H, W) float32, exposure (H, W) float32):
+          dist_km  = distance to nearest fire cell (km), 0 on fire cells.
+          exposure = (W . d) / |d|^2  (downwind-exposure; >0 downwind of a nearby fire,
+                     <0 upwind, ~0 far; 0 on fire cells). NaN where wind is NaN (sea).
+    """
+    from scipy.ndimage import distance_transform_edt
+
+    mask = np.asarray(fire_mask) > 0
+    H, W = mask.shape
+    if not mask.any():
+        return (np.full((H, W), no_fire_dist_km, dtype="float32"),
+                np.zeros((H, W), dtype="float32"))
+
+    # distance_transform_edt measures distance to the nearest ZERO; invert so fire=0.
+    dist_cells, (rf, cf) = distance_transform_edt(~mask, return_indices=True)
+    cell_m = abs(float(x_coords[1] - x_coords[0]))
+    dist_m = dist_cells * cell_m
+
+    # fire -> cell displacement in metres, from COORDINATE VALUES (sign-safe):
+    east = x_coords[np.newaxis, :] - x_coords[cf]   # x_cell - x_nearestfire
+    north = y_coords[:, np.newaxis] - y_coords[rf]   # y_cell - y_nearestfire
+    dot = wind_u * east + wind_v * north
+    with np.errstate(divide="ignore", invalid="ignore"):
+        exposure = np.where(dist_m > 0, dot / (dist_m ** 2), 0.0)
+
+    return (dist_m / 1000.0).astype("float32"), exposure.astype("float32")
 
 
 # ---------------------------------------------------------------------------

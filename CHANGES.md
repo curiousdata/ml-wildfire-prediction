@@ -83,6 +83,13 @@ New module **`src/data/feature_engineering.py`** — pure, slice-validated deriv
   the hourly-mean precip units (`<1/24 mm` ⇒ 46% of land-days dry). Overlaps FWI's drought codes —
   incremental value is a step-3 question.
 
+### §E spatial fire-context (on the coarse fire mask)
+- **`dist_to_fire`** (km to nearest fire cell) + **`fire_upwind_exposure`** = (W·d)/|d|² — the
+  hand-engineered advection of yesterday's fire (>0 downwind of a nearby fire, the highest-ROI spatial
+  idea). Resolution-coupled → computed post-coarsen and appended to the 4 km cube (`add_fire_context.py`).
+  Geometry validated synthetic (incl. the y-axis-decreasing sign) + real (`dist==0` iff fire cell). Both
+  favour *continuation* → read via the §A new-ignition split. Cube now 271 vars.
+
 ### Data pipeline — rewrote `coarsen.py` (silver → gold) + built the provisional 4 km cube
 - **Semantic pooling** replaces the old mean-everything: `*_max`→max, `*_min`→min, label `is_fire`→max,
   CLC/aspect one-hots→fractional composition, `AutonomousCommunities`→mode; engineered features computed
