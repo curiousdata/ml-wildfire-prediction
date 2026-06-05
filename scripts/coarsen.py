@@ -76,6 +76,12 @@ WIND_DIR_VARS = {"wind_direction_mean", "wind_direction_at_max_speed"}
 CATEGORICAL_VARS = {"AutonomousCommunities"}
 DROP_VARS = {"x_index", "y_index", "x_coordinate", "y_coordinate", "is_near_fire"}
 
+# LST (Kelvin) carries ~0.07% physically-impossible cloud/edge artifacts from its
+# multi-source satellite origin (min ~156 K, max ~409 K). Clip to a physical land-
+# surface band BEFORE pooling so 4x4 mean-pooling doesn't ingest the garbage.
+# (Real values span ~262-314 K; this only touches the artifact tails.)
+LST_CLIP_K = (250.0, 340.0)
+
 
 def classify(name: str) -> str:
     """Pooling op for a silver variable: 'mean' | 'max' | 'min' | 'special'."""
@@ -117,6 +123,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Coarsen silver -> gold (semantic pooling + engineered features).")
     parser.add_argument("--factor", type=int, default=4, help="Spatial coarsening factor (default: 4).")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite the output Zarr if it exists.")
+    parser.add_argument("--max-time", type=int, default=0,
+                        help="Debug/smoke: keep only the first N time steps (0 = all).")
     args = parser.parse_args()
     F = args.factor
 
@@ -130,6 +138,17 @@ def main() -> None:
         shutil.rmtree(out)
 
     ds = xr.open_zarr(SILVER, consolidated=True, decode_times=True)
+    if args.max_time:
+        ds = ds.isel(time=slice(0, args.max_time))
+        print(f"[coarsen] DEBUG: restricted to first {args.max_time} time steps")
+
+    # LST quality clip (see LST_CLIP_K). Reassigns the in-memory lazy var only;
+    # silver on disk is never modified.
+    if "LST" in ds:
+        lo, hi = LST_CLIP_K
+        ds["LST"] = ds["LST"].clip(min=lo, max=hi)
+        print(f"[coarsen] LST clipped to physical band {LST_CLIP_K} K before pooling")
+
     ckw = dict(y=F, x=F, boundary="trim")  # same factor+boundary for every group (map-safe coords)
 
     allv = list(ds.data_vars)
@@ -172,10 +191,18 @@ def main() -> None:
         coarse[f"precip_sum_{w}d"] = cp.rolling(time=w, min_periods=w).sum()
 
     # days_since_rain is a non-linear cumulative-along-time op -> compute eagerly on the
-    # (small) coarse precip series, defined on the coarse grid.
-    cp_vals = cp.transpose("time", "y", "x").values
-    coarse["days_since_rain"] = (("time", "y", "x"),
-                                 days_since_rain(cp_vals, threshold=DRY_DAY_THRESHOLD_MM))
+    # (small) coarse precip series, defined on the coarse grid. Tiled over x and kept in
+    # float32 to bound peak memory (the int cumsum is the hog).
+    cp_vals = cp.transpose("time", "y", "x").astype("float32").values
+    nt, ny, nx = cp_vals.shape
+    dsr = np.empty((nt, ny, nx), dtype="float32")
+    step = max(1, nx // 6)
+    for x0 in range(0, nx, step):
+        dsr[:, :, x0:x0 + step] = days_since_rain(
+            cp_vals[:, :, x0:x0 + step], threshold=DRY_DAY_THRESHOLD_MM
+        ).astype("float32")
+    coarse["days_since_rain"] = (("time", "y", "x"), dsr)
+    del cp_vals, dsr
 
     # --- calendar features (time-only; stored as (time,) — broadcast at read time) ---
     doy_sin, doy_cos = day_of_year_sincos(coarse["time"].dt.dayofyear.values)
@@ -195,7 +222,9 @@ def main() -> None:
 
     print(f"[coarsen] writing {out}  dims={dict(coarse.sizes)}  vars={len(coarse.data_vars)}")
     with ProgressBar():
-        coarse.to_zarr(out, mode="w", encoding=encoding, consolidated=True)
+        # zarr_format=2: matches the existing silver/coarse cubes and accepts the
+        # numcodecs.Blosc compressor (zarr 3.x's default v3 format rejects it).
+        coarse.to_zarr(out, mode="w", encoding=encoding, consolidated=True, zarr_format=2)
     print("[coarsen] done:", out)
 
 

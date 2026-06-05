@@ -5,6 +5,9 @@ Written to double as a narrative for presenting the project: each entry is a bea
 not just a diff. (The forward-looking plan and open decisions live in `ROADMAP.md`; per-agent
 working notes in `CLAUDE.md`.)
 
+**Rule:** every bug found or fixed gets logged under a "Bugs found & fixed" subsection of the
+current dated entry — what was wrong, its impact, and the fix (or that it's flagged, not yet fixed).
+
 ---
 
 ## 2026-06-05 — Recovery, cleanup, and the pivot to a data-first rebuild
@@ -79,3 +82,39 @@ New module **`src/data/feature_engineering.py`** — pure, slice-validated deriv
   no label leakage. Validated synthetic-exact vs. pandas, and real-data dry-day threshold calibrated to
   the hourly-mean precip units (`<1/24 mm` ⇒ 46% of land-days dry). Overlaps FWI's drought codes —
   incremental value is a step-3 question.
+
+### Data pipeline — rewrote `coarsen.py` (silver → gold) + built the provisional 4 km cube
+- **Semantic pooling** replaces the old mean-everything: `*_max`→max, `*_min`→min, label `is_fire`→max,
+  CLC/aspect one-hots→fractional composition, `AutonomousCommunities`→mode; engineered features computed
+  inline; calendar stored as `(time,)`. Dropped non-features (`x_index`/`y_index`/`x/y_coordinate`,
+  `is_near_fire`). **Map georeferencing preserved** — verified the coarse `x`/`y` block-mean coords match
+  the convention the Streamlit map already renders (`coarse x[0] == mean(silver x[0:F])`).
+- Provisional **4 km analysis cube** (230×297, 269 vars) built (23m50s, 22 GB) from the validated silver
+  cube and QC-passed (engineered features sane, LST clipped, map coords preserved). **Fire positive rate
+  0.0042%** — extreme imbalance at fine res, confirming tiling + class-balanced crop sampling will be essential.
+
+### Data validation — audited everything before silver (the conversion was never rigorously checked)
+- NetCDF→Zarr conversion confirmed **faithful**: perfect daily time axis (6241 steps, no gaps/dupes),
+  correct CRS/coords, **zero** fill-leaks / all-NaN / corruption across 261 vars, physically sane ranges,
+  and real Spanish fire seasonality (summer + NW spring). **No re-conversion needed.**
+
+### Bugs found & fixed
+- **`wind_direction` circular averaging** *(found → fixed)*. The old coarsen mean-pooled compass degrees,
+  so 350° + 10° averaged to 180° — the exact opposite direction. **Impact:** corrupts any wind-direction
+  use, and would have made the planned upwind-exposure feature point backwards. **Fix:** decompose to u/v
+  *before* pooling (`coarsen.py`); raw degrees dropped from the gold cube.
+- **LST cloud/edge artifacts** *(found → fixed)*. 0.07% of LST cells are physically impossible
+  (156 K = −117 °C, 409 K = 136 °C) from its multi-source satellite origin. **Impact:** 4×4 mean-pooling
+  ingests the garbage (one 156 K outlier drags a cell mean ~8 K). **Fix:** clip to [250, 340] K before pooling.
+- **zarr v3 vs `numcodecs.Blosc`** *(found via smoke test → fixed)*. zarr 3.1.5 defaults to format v3, which
+  rejects the Blosc compressor object (`Expected a BytesBytesCodec`). **Impact:** any write via the old
+  encoding pattern fails — latent in `conversion.py` and the old `coarsen.py` too. **Fix:** write `zarr_format=2`
+  (matches the existing cubes).
+- **Old coarsen mean-pooled *everything*** *(found → fixed)*. Averaging `_max`/`_min` statistics, categorical
+  region codes, and grid indices produces meaningless values. **Fix:** semantic + special-case pooling (above).
+- **Stale serving default** *(found → fixed earlier)*. `app.py` defaulted to a nonexistent
+  `IberFire_coarse8_time1.zarr`; realigned to `coarse32` (only worked before because compose overrode it).
+- **LST multi-source inhomogeneity** *(found → flagged, NOT fixed)*. LST is stitched from ERA5 skin-temp →
+  CLMS v1 → CLMS v2 (breakpoints 2010-06-20, 2021-01-19); train (2008–22) and val (2023–24) draw partly from
+  different instruments → built-in distribution shift for that feature. Flagged in ROADMAP §B for the
+  predictive-potential analysis to decide LST's fate.
