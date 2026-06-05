@@ -29,6 +29,8 @@ class BaseIberFireDataset(Dataset):
         stats: Optional dict with precomputed normalization stats
                {var_name: {"mean": float, "std": float}}
         compute_stats: Whether to compute stats if not provided
+        overwrite_stats: If True, recompute stats even when stats_path already
+               exists. If False (default), an existing stats file is reused.
         stats_path: Optional path to load/save normalization stats JSON.
 
     Usage (typical for U-Net MVP):
@@ -53,6 +55,7 @@ class BaseIberFireDataset(Dataset):
         lead_time: int = 1,
         stats: Optional[Dict[str, Dict[str, float]]] = None,
         compute_stats: bool = False,
+        overwrite_stats: bool = False,
         stats_path: Optional[str] = None,
         mode: str = "all",
         day_indices_path: Optional[str] = None,
@@ -225,22 +228,21 @@ class BaseIberFireDataset(Dataset):
             self.stats = stats
 
         elif compute_stats:
-            overwrite = True
-
-            # If a stats file already exists, ask whether to overwrite or reuse it
-            if self.stats_path is not None and self.stats_path.exists():
-                resp = input(
-                    f" Stats found at {self.stats_path}. Do you want to overwrite? [y/N]: "
-                ).strip().lower()
-                if resp not in ("y", "yes"):
-                    logger.info(f" Keeping existing stats from: {self.stats_path}")
-                    with open(self.stats_path) as f:
-                        self.stats = json.load(f)
-                    overwrite = False
-                else:
-                    logger.info(f" Overwriting stats at: {self.stats_path}")
-
-            if overwrite:
+            # Non-interactive: reuse an existing stats file unless explicitly told
+            # to overwrite it (overwrite_stats=True). No prompts, so this is safe
+            # under DataLoader workers and headless/CI runs.
+            if (
+                self.stats_path is not None
+                and self.stats_path.exists()
+                and not overwrite_stats
+            ):
+                logger.info(
+                    f" Reusing existing stats from {self.stats_path} "
+                    "(pass overwrite_stats=True to recompute)."
+                )
+                with open(self.stats_path) as f:
+                    self.stats = json.load(f)
+            else:
                 logger.info(" Computing normalization stats from data...")
                 self.stats = self._compute_stats()
 
