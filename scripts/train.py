@@ -13,7 +13,6 @@ if str(project_root) not in sys.path:
 import mlflow
 import mlflow.pytorch
 import numpy as np
-import segmentation_models_pytorch as smp
 import torch
 import tqdm
 from sklearn.metrics import average_precision_score, roc_auc_score
@@ -22,6 +21,8 @@ import math
 import logging
 
 from src.data.datasets import BaseIberFireDataset
+from src.data.features import FEATURE_VARS
+from src.models.cnn import build_unet
 
 
 if __name__ == "__main__":
@@ -66,130 +67,10 @@ if __name__ == "__main__":
         mlflow.log_param("lead_time", lead_time)
         mlflow.log_param("batch_size", batch_size)
 
-        feature_vars = [
-            # Dynamic features (time-dependent)
-            "FAPAR",
-            "FWI",
-            "LAI",
-            "LST",
-            "NDVI",
-            "RH_max",
-            "RH_mean",
-            "RH_min",
-            "RH_range",
-            "SWI_001",
-            "SWI_005",
-            "SWI_010",
-            "SWI_020",
-            "is_holiday",
-            #"is_near_fire",
-            "surface_pressure_max",
-            "surface_pressure_mean",
-            "surface_pressure_min",
-            "surface_pressure_range",
-            "t2m_max",
-            "t2m_mean",
-            "t2m_min",
-            "t2m_range",
-            "total_precipitation_mean",
-            "wind_direction_at_max_speed",
-            "wind_direction_mean",
-            "wind_speed_max",
-            "wind_speed_mean",
-            # CLC Level-3 classes (year-aware bases)
-            "CLC_1",
-            "CLC_2",
-            "CLC_3",
-            "CLC_4",
-            "CLC_5",
-            "CLC_6",
-            "CLC_7",
-            "CLC_8",
-            "CLC_9",
-            "CLC_10",
-            "CLC_11",
-            "CLC_12",
-            "CLC_13",
-            "CLC_14",
-            "CLC_15",
-            "CLC_16",
-            "CLC_17",
-            "CLC_18",
-            "CLC_19",
-            "CLC_20",
-            "CLC_21",
-            "CLC_22",
-            "CLC_23",
-            "CLC_24",
-            "CLC_25",
-            "CLC_26",
-            "CLC_27",
-            "CLC_28",
-            "CLC_29",
-            "CLC_30",
-            "CLC_31",
-            "CLC_32",
-            "CLC_33",
-            "CLC_34",
-            "CLC_35",
-            "CLC_36",
-            "CLC_37",
-            "CLC_38",
-            "CLC_39",
-            "CLC_40",
-            "CLC_41",
-            "CLC_42",
-            "CLC_43",
-            "CLC_44",
-            # CLC aggregated proportions (year-aware bases)
-            "CLC_agricultural_proportion",
-            "CLC_arable_land_proportion",
-            "CLC_artificial_proportion",
-            "CLC_artificial_vegetation_proportion",
-            "CLC_forest_and_semi_natural_proportion",
-            "CLC_forest_proportion",
-            "CLC_heterogeneous_agriculture_proportion",
-            "CLC_industrial_proportion",
-            "CLC_inland_waters_proportion",
-            "CLC_inland_wetlands_proportion",
-            "CLC_marine_waters_proportion",
-            "CLC_maritime_wetlands_proportion",
-            "CLC_mine_proportion",
-            "CLC_open_space_proportion",
-            "CLC_permanent_crops_proportion",
-            "CLC_scrub_proportion",
-            "CLC_urban_fabric_proportion",
-            "CLC_waterbody_proportion",
-            "CLC_wetlands_proportion",
-            # Other static features
-            "aspect_1",
-            "aspect_2",
-            "aspect_3",
-            "aspect_4",
-            "aspect_5",
-            "aspect_6",
-            "aspect_7",
-            "aspect_8",
-            "aspect_NODATA",
-            "dist_to_railways_mean",
-            "dist_to_railways_stdev",
-            "dist_to_roads_mean",
-            "dist_to_roads_stdev",
-            "dist_to_waterways_mean",
-            "dist_to_waterways_stdev",
-            "elevation_mean",
-            "elevation_stdev",
-            "is_natura2000",
-            "is_sea",
-            "is_spain",
-            "is_waterbody",
-            "roughness_mean",
-            "roughness_stdev",
-            "slope_mean",
-            "slope_stdev",
-            # Year-aware population density (popdens_YYYY family)
-            "popdens",
-        ]
+        # Canonical feature set lives in src/data/features.py (single source of
+        # truth, shared with the serving app). Channel order is load-bearing for
+        # loaded checkpoints, so edit it there, not here.
+        feature_vars = FEATURE_VARS
 
         in_channels = len(feature_vars)
 
@@ -348,13 +229,13 @@ if __name__ == "__main__":
         else:
             device = torch.device("cpu")
             
-        model = smp.Unet(
-            encoder_name=encoder_name,
-            encoder_weights="imagenet",
+        model = build_unet(
             in_channels=in_channels,
+            encoder_name=encoder_name,
             classes=1,
-            activation=None,
+            encoder_weights="imagenet",
             decoder_dropout=decoder_dropout,
+            activation=None,
         )
 
         model = model.to(device)
