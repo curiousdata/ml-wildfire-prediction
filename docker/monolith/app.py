@@ -24,9 +24,10 @@ except (ImportError, ModuleNotFoundError):  # pragma: no cover
     calculate_default_transform = None
     reproject = None
     Resampling = None
-import segmentation_models_pytorch as smp
 
 from src.data.datasets import BaseIberFireDataset
+from src.data.features import FEATURE_VARS
+from src.models.cnn import build_unet
 
 
 @dataclass(frozen=True)
@@ -45,7 +46,7 @@ class Cfg:
 
 def get_cfg() -> Cfg:
     return Cfg(
-        zarr_path=os.getenv("IBERFIRE_ZARR_PATH", "/app/data/gold/IberFire_coarse8_time1.zarr"),
+        zarr_path=os.getenv("IBERFIRE_ZARR_PATH", "/app/data/gold/IberFire_coarse32.zarr"),
         stats_path=os.getenv("NORM_STATS_PATH", "/app/stats/simple_iberfire_stats_train.json"),
         model_path=os.getenv("MODEL_PATH", "/app/models"),
         model_file=os.getenv("MODEL_FILE", "resnet34_v9.pth"),
@@ -56,84 +57,6 @@ def get_cfg() -> Cfg:
         torch_device=os.getenv("TORCH_DEVICE", "cpu"),
         source_epsg=int(os.getenv("SOURCE_EPSG", "3035")),
     )
-
-
-# IMPORTANT: Must match scripts/train.py feature_vars for the served model.
-FEATURE_VARS: List[str] = [
-    "FAPAR",
-    "FWI",
-    "LAI",
-    "LST",
-    "NDVI",
-    "RH_max",
-    "RH_mean",
-    "RH_min",
-    "RH_range",
-    "SWI_001",
-    "SWI_005",
-    "SWI_010",
-    "SWI_020",
-    "is_holiday",
-    "surface_pressure_max",
-    "surface_pressure_mean",
-    "surface_pressure_min",
-    "surface_pressure_range",
-    "t2m_max",
-    "t2m_mean",
-    "t2m_min",
-    "t2m_range",
-    "total_precipitation_mean",
-    "wind_direction_at_max_speed",
-    "wind_direction_mean",
-    "wind_speed_max",
-    "wind_speed_mean",
-    *[f"CLC_{i}" for i in range(1, 45)],
-    "CLC_agricultural_proportion",
-    "CLC_arable_land_proportion",
-    "CLC_artificial_proportion",
-    "CLC_artificial_vegetation_proportion",
-    "CLC_forest_and_semi_natural_proportion",
-    "CLC_forest_proportion",
-    "CLC_heterogeneous_agriculture_proportion",
-    "CLC_industrial_proportion",
-    "CLC_inland_waters_proportion",
-    "CLC_inland_wetlands_proportion",
-    "CLC_marine_waters_proportion",
-    "CLC_maritime_wetlands_proportion",
-    "CLC_mine_proportion",
-    "CLC_open_space_proportion",
-    "CLC_permanent_crops_proportion",
-    "CLC_scrub_proportion",
-    "CLC_urban_fabric_proportion",
-    "CLC_waterbody_proportion",
-    "CLC_wetlands_proportion",
-    "aspect_1",
-    "aspect_2",
-    "aspect_3",
-    "aspect_4",
-    "aspect_5",
-    "aspect_6",
-    "aspect_7",
-    "aspect_8",
-    "aspect_NODATA",
-    "dist_to_railways_mean",
-    "dist_to_railways_stdev",
-    "dist_to_roads_mean",
-    "dist_to_roads_stdev",
-    "dist_to_waterways_mean",
-    "dist_to_waterways_stdev",
-    "elevation_mean",
-    "elevation_stdev",
-    "is_natura2000",
-    "is_sea",
-    "is_spain",
-    "is_waterbody",
-    "roughness_mean",
-    "roughness_stdev",
-    "slope_mean",
-    "slope_stdev",
-    "popdens",
-]
 
 
 @st.cache_resource(show_spinner=False)
@@ -159,16 +82,15 @@ def load_model(cfg: Cfg) -> torch.nn.Module:
 
     device = torch.device(cfg.torch_device)
 
-    # Match the notebook/training architecture exactly
-    # Note: decoder_dropout is not specified here because it only affects training,
-    # not inference. The loaded weights already reflect dropout's effects during training.
+    # Build via the shared factory so train/serve architecture can't drift.
+    # encoder_weights=None: the checkpoint overwrites the weights, so skip the
+    # ImageNet download. decoder_dropout is inert at eval time.
     in_channels = len(FEATURE_VARS)
-    m = smp.Unet(
-        encoder_name="resnet34",
-        encoder_weights=None,
+    m = build_unet(
         in_channels=in_channels,
+        encoder_name="resnet34",
         classes=1,
-        activation=None,
+        encoder_weights=None,
     ).to(device)
 
     # Load checkpoint. In PyTorch 2.6, torch.load defaults to weights_only=True.
