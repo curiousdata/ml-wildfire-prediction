@@ -52,3 +52,5 @@ models/resnet50_v1.pth
 models/resnext50_32x4d_v1.pth
 models/se_resnet50_v1.pth
 models/se_resnext50_32x4d_v1.pth
+CLAUDE.md
+ROADMAP.md
