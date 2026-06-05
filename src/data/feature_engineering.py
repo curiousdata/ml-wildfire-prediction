@@ -125,6 +125,52 @@ def equilibrium_moisture_content(t_celsius, rh_pct):
     return np.maximum(emc, 0.0)
 
 
+def keetch_byram_drought_index(daily_rain_mm, t_max_c, annual_rain_mm, q0=None):
+    """Keetch-Byram Drought Index (mm of soil-moisture deficit, 0..203.2), metric form.
+
+    A recursive daily drought accumulator — repeatedly among the strongest fire
+    predictors. Builds with hot/dry days, drops after rain. HIGHER = drier.
+
+    Args:
+        daily_rain_mm: (time, y, x) daily TOTAL rainfall in mm (note: from this cube,
+            ``24 * total_precipitation_mean`` since that var is an hourly mean).
+        t_max_c: (time, y, x) daily max temperature (°C).
+        annual_rain_mm: (y, x) mean annual rainfall (mm) per pixel.
+        q0: optional (y, x) initial deficit (default 0 = saturated; ~1 month spin-up
+            before the 2008 training start).
+
+    Returns:
+        (time, y, x) float64 KBDI. NaNs (sea) propagate.
+
+    Rainfall handling follows Keetch-Byram: the first 5.08 mm (0.20 in) of each wet
+    spell is intercepted (no effect); rain beyond that reduces the deficit. The
+    drought factor is clamped >= 0 (drying cannot be negative on cold days).
+    """
+    rain = np.asarray(daily_rain_mm, dtype="float64")
+    tmax = np.asarray(t_max_c, dtype="float64")
+    R = np.asarray(annual_rain_mm, dtype="float64")
+    nt = rain.shape[0]
+    Q = (np.zeros(rain.shape[1:], dtype="float64") if q0 is None
+         else np.asarray(q0, dtype="float64").copy())
+    cum_wet = np.zeros_like(Q)
+    denom = 1.0 + 10.88 * np.exp(-0.001736 * R)
+    THRESH = 5.08
+    out = np.empty_like(rain)
+    for t in range(nt):
+        r = rain[t]
+        wet = r > 0
+        prev_excess = np.maximum(cum_wet - THRESH, 0.0)
+        cum_wet = np.where(wet, cum_wet + r, 0.0)          # reset wet spell on dry days
+        # net rain only reduces Q on WET days (on a dry day the spell resets, which
+        # would otherwise make this difference negative and spuriously add deficit).
+        net_rain = np.where(wet, np.maximum(cum_wet - THRESH, 0.0) - prev_excess, 0.0)
+        Q = np.maximum(Q - net_rain, 0.0)
+        dq = (203.2 - Q) * (0.968 * np.exp(0.0875 * tmax[t] + 1.5552) - 8.30) / denom * 1e-3
+        Q = np.minimum(Q + np.maximum(dq, 0.0), 203.2)
+        out[t] = Q
+    return out
+
+
 def fosberg_ffwi(emc_pct, wind_speed_ms):
     """Fosberg Fire Weather Index from EMC (%) and wind speed (m/s).
 

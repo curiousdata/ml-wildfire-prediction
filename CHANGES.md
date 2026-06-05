@@ -125,3 +125,11 @@ New module **`src/data/feature_engineering.py`** — pure, slice-validated deriv
   CLMS v1 → CLMS v2 (breakpoints 2010-06-20, 2021-01-19); train (2008–22) and val (2023–24) draw partly from
   different instruments → built-in distribution shift for that feature. Flagged in ROADMAP §B for the
   predictive-potential analysis to decide LST's fate.
+- **KBDI recursion error** *(found via validation → fixed)*. `net_rain` went negative on the first dry day
+  after a wet spell (cum_wet reset made `new_excess < prev_excess`), spuriously *adding* drought deficit
+  (cold-check Q hit 54.9 where it should be 0). **Fix:** zero `net_rain` on dry days. Now cold-check Q=0.
+- **Precipitation units ambiguity** *(found → flagged, blocks KBDI)*. `total_precipitation_mean` is an ERA5-Land
+  hourly-mean of a *cumulative* field; `×24` implies ~8665 mm/yr for Spain (actual ~640) — ~13× too high.
+  Likely `daily_total ≈ 2×tp` (~722 mm/yr ✓). **Impact:** physical-mm features (KBDI) can't be trusted until
+  resolved; relative precip features (`precip_sum_*`, `days_since_rain`) and SPI are unaffected (unit-independent).
+  To resolve via the IberFire paper/repo + AEMET annual-rainfall calibration.
