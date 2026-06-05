@@ -68,3 +68,14 @@ New module **`src/data/feature_engineering.py`** — pure, slice-validated deriv
   Hot-Dry-Windy index. Validated: textbook `e_s`, VPD ≥ 0, peak > mean, and a sharp fire-season
   signal (VPD_peak 4.82 kPa summer vs 0.58 winter; HDW 17.9 vs 1.2). corr(VPD_peak, FWI)=+0.74 —
   related but distinct, so their incremental value over the existing FWI is a question for analysis.
+- **`day_of_year_sincos`** — cyclic seasonality encoding (the model's only prior calendar signal was
+  the sparse `is_holiday`). Validated: on the unit circle, Dec-31↔Jan-1 adjacency restored (no seam).
+- **`day_of_week_sincos`** — weekly human-ignition rhythm (weekday/weekend), orthogonal to season and
+  weather. Validated: equal spacing incl. the Sun→Mon wrap. *Skipped `month` deliberately* — redundant
+  with day-of-year (coarser, and reintroduces the Dec→Jan seam). Clean calendar set is now
+  `{day-of-year, day-of-week, is_holiday}`: annual + weekly + holiday, no overlap.
+- **Antecedent dryness** — `rolling_sum_time` (trailing 7/30/90-day precip sums) + `days_since_rain`
+  (dry-spell length, which recovers the recency/ordering a sum discards). Causal (backward windows),
+  no label leakage. Validated synthetic-exact vs. pandas, and real-data dry-day threshold calibrated to
+  the hourly-mean precip units (`<1/24 mm` ⇒ 46% of land-days dry). Overlaps FWI's drought codes —
+  incremental value is a step-3 question.

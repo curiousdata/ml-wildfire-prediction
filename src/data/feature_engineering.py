@@ -114,3 +114,131 @@ def hdw_index(vpd_kpa_value, wind_speed_ms):
     absolute scale is irrelevant since training normalizes the channel.
     """
     return vpd_kpa_value * wind_speed_ms
+
+
+# ---------------------------------------------------------------------------
+# Seasonality: day-of-year as a cyclic (sin, cos) pair
+# ---------------------------------------------------------------------------
+# Fire risk in Spain is strongly annual; this gives the model a smooth seasonal
+# prior. sin/cos removes the Dec-31 -> Jan-1 discontinuity that raw day-number has,
+# and the pair (vs. a single sinusoid) uniquely identifies the phase around the year.
+#
+# NOTE: this varies in TIME only (one scalar pair per day, identical across all
+# pixels). Storing it as a full (time, y, x) field would duplicate one value across
+# ~1.1M cells per day — at materialization, prefer a (time,) variable broadcast at
+# read time, or compute it on-the-fly from the cube's `time` coordinate.
+
+_DAYS_PER_YEAR = 365.25  # fractional, so the phase doesn't drift on leap years
+
+
+def day_of_year_sincos(day_of_year, period: float = _DAYS_PER_YEAR):
+    """Encode day-of-year (1..366) as a cyclic (sin, cos) pair on the unit circle.
+
+    Args:
+        day_of_year: integer day-of-year, 1-based (e.g. from
+            ``xarray.DataArray.dt.dayofyear``). Array-like.
+        period: length of the cycle in days (default 365.25).
+
+    Returns:
+        (doy_sin, doy_cos): two arrays in [-1, 1] with ``sin**2 + cos**2 == 1``.
+        Angle is 0 at Jan 1, advancing through the year — so Dec 31 and Jan 1 are
+        adjacent on the circle (no New-Year seam).
+    """
+    angle = 2.0 * np.pi * (np.asarray(day_of_year) - 1.0) / period
+    return np.sin(angle), np.cos(angle)
+
+
+def day_of_week_sincos(day_of_week, period: float = 7.0):
+    """Encode day-of-week as a cyclic (sin, cos) pair (weekly human-activity rhythm).
+
+    Captures the weekly ignition cadence (weekday vs weekend) that human-caused
+    fires follow — orthogonal to the annual cycle (`day_of_year_sincos`) and to
+    `is_holiday`. Sunday sits adjacent to Monday on the circle (no week seam).
+
+    Args:
+        day_of_week: 0-based day index, Monday=0 .. Sunday=6 (e.g. from
+            ``xarray.DataArray.dt.dayofweek``). Array-like.
+        period: length of the cycle in days (default 7).
+
+    Returns:
+        (dow_sin, dow_cos): arrays in [-1, 1] with ``sin**2 + cos**2 == 1``.
+
+    Caveat: the EFFIS `is_fire` label is a burned-area polygon stamped across each
+    fire's start–end range, so the weekly *ignition* signal is smeared over
+    multi-day fire durations. Expect this feature's value to show up mainly in the
+    new-ignition vs. continuation evaluation, not the blended label.
+    """
+    angle = 2.0 * np.pi * np.asarray(day_of_week) / period
+    return np.sin(angle), np.cos(angle)
+
+
+# ---------------------------------------------------------------------------
+# Antecedent dryness (temporal-window precipitation features)
+# ---------------------------------------------------------------------------
+# Trailing windows look BACKWARD (days t-N+1 .. t, inclusive of today) -> causal
+# for a t+1 target. They are functions of past INPUTS only, so computing them on
+# the full series before any train/val/test split does NOT leak the label.
+#
+# These partially overlap FWI's drought codes (DC/DMC are exponential precip
+# accumulators) -> step-3 analysis must check incremental value over FWI.
+#
+# Memory: time is axis 0. On the full (time, y, x) cube these can't fit in RAM at
+# once -> at materialization, run per spatial chunk (full time each). The
+# xarray-lazy equivalent of `rolling_sum_time` is
+# `da.rolling(time=window, min_periods=window).sum()`.
+
+# Trailing windows to materialize (days). Short-term surface dryness -> drought.
+ANTECEDENT_WINDOWS_DAYS = (7, 30, 90)
+
+# "Dry day" threshold calibrated to `total_precipitation_mean` (an hourly-mean in
+# mm): < 1 mm/day total == hourly-mean < 1/24 mm. ~46% of land-days qualify
+# (verified on 2020-2022, 2026-06-05). Pass this to `days_since_rain`.
+DRY_DAY_THRESHOLD_MM = 1.0 / 24.0
+
+
+def rolling_sum_time(arr, window: int):
+    """Trailing-window sum along axis 0 (time), inclusive of the current index.
+
+    Args:
+        arr: ndarray with time as axis 0 (e.g. precipitation (time, y, x)).
+        window: number of days in the trailing window (>= 1).
+
+    Returns:
+        Same-shape float64 array. Rows before a full window is available (the
+        first ``window - 1``) are NaN. NaNs in the input propagate (sea cells are
+        NaN throughout and are masked downstream).
+    """
+    if window < 1:
+        raise ValueError("window must be >= 1")
+    arr = np.asarray(arr, dtype="float64")
+    csum = np.cumsum(arr, axis=0)
+    out = np.full_like(csum, np.nan)
+    out[window - 1:] = csum[window - 1:]                 # t == window-1: sum of first `window`
+    out[window:] = csum[window:] - csum[:-window]        # t >= window:   csum[t] - csum[t-window]
+    return out
+
+
+def days_since_rain(precip, threshold: float):
+    """Length of the dry spell ending at each day (consecutive days < threshold).
+
+    Recovers the recency/ordering information that a rolling *sum* discards: "80
+    dry days then rain" and "rain then 80 dry days" have the same 90-day sum but
+    very different `days_since_rain`.
+
+    Args:
+        precip: ndarray with time as axis 0. NOTE `total_precipitation_mean` is an
+            hourly-mean (mm), so `threshold` must be in those (small) units —
+            calibrate it, don't assume ~1 mm.
+        threshold: a day with ``precip < threshold`` counts as "dry". NaN days
+            (sea) compare False, i.e. treated as not-dry (count stays 0).
+
+    Returns:
+        float64 array, same shape; value at t = number of consecutive dry days
+        ending at (and including) t. 0 on a wet day.
+    """
+    precip = np.asarray(precip, dtype="float64")
+    is_dry = precip < threshold                          # NaN < x -> False (sea -> not dry)
+    csum = np.cumsum(is_dry.astype("int64"), axis=0)
+    reset = np.where(~is_dry, csum, 0)                   # snapshot the count at each wet day
+    running = np.maximum.accumulate(reset, axis=0)       # last wet-day count seen so far
+    return (csum - running).astype("float64")            # steps since that reset
