@@ -5,7 +5,7 @@
 This is a machine learning project for predicting wildfire risks in Catalonia using deep learning models trained on the **IberFire dataset**. The project combines:
 - Deep learning models (U-Net with various encoders) for wildfire risk prediction
 - Data processing pipelines (NetCDF to Zarr conversion)
-- A web-based MVP application (FastAPI backend + Streamlit frontend)
+- A web-based Streamlit application (model inference + map visualization) — the "monolith" at `docker/monolith/`
 - MLflow integration for experiment tracking
 
 ## Tech Stack
@@ -13,8 +13,7 @@ This is a machine learning project for predicting wildfire risks in Catalonia us
 ### Core Technologies
 - **Python 3.13+**: Primary programming language
 - **PyTorch**: Deep learning framework for model training and inference
-- **FastAPI**: RESTful API backend framework
-- **Streamlit**: Frontend web application for visualizations
+- **Streamlit**: Web application for model inference + map visualization (the monolith)
 - **Docker & Docker Compose**: Containerization and orchestration
 
 ### Key Libraries
@@ -27,34 +26,29 @@ This is a machine learning project for predicting wildfire risks in Catalonia us
 ### Data Formats
 - **NetCDF**: Raw input data format
 - **Zarr**: Optimized storage format for efficient data access
-- **TorchScript**: Model serialization format for deployment
+- **PyTorch `.pth`**: Model weights format (the monolith loads `.pth` directly via the `build_unet` factory)
 
 ## Repository Structure
 
 ```
-catalonia-wildfire-prediction/
+ml-wildfire-prediction/
 ├── .github/                     # GitHub configuration and workflows
-├── catalonia-wildfire-mvp/      # Web application
-│   ├── backend/                 # FastAPI service for model inference
-│   │   └── src/
-│   │       ├── api/            # API routes
-│   │       ├── inference/      # Prediction logic
-│   │       └── types/          # Schema definitions
-│   └── frontend/                # Streamlit UI
-│       └── src/
 ├── data/                        # Datasets (NetCDF, Zarr formats)
+├── docker/monolith/             # Streamlit web app (model inference + map viz)
+│   └── app.py
 ├── notebooks/                   # Jupyter notebooks for EDA and experiments
 ├── scripts/                     # Training and data processing scripts
 │   ├── train.py                 # U-Net model training
-│   ├── netcdf_to_zarr.py       # Data format conversion
+│   ├── conversion.py            # NetCDF → Zarr conversion
 │   ├── coarsen.py              # Spatial resolution adjustment
 │   └── rechunk.py              # Data chunking optimization
 ├── src/                         # Core modules
-│   ├── data/                    # Dataset classes
-│   │   └── datasets.py
-│   └── models/                  # Model architectures
+│   ├── data/                    # Dataset classes + canonical FEATURE_VARS
+│   │   ├── datasets.py
+│   │   └── features.py
+│   └── models/                  # Model architectures (build_unet factory)
 │       └── cnn.py
-└── docker-compose.yml           # Application configuration
+└── docker-compose.yml           # Monolith application configuration
 ```
 
 ## Development Guidelines
@@ -87,9 +81,8 @@ catalonia-wildfire-prediction/
 
 ### Docker & Deployment
 - Use `docker-compose.yml` from project root for the monolith application
-- Backend runs on port 8000 (FastAPI)
-- Frontend runs on port 8501 (Streamlit)
-- Services are defined as `backend` and `frontend` in docker-compose
+- Single service (`monolith`) — a Streamlit app on port 8501, built from `docker/monolith/Dockerfile`
+- It loads the `.pth` model directly and reads the gold Zarr; no separate backend/API
 
 ## Building and Running
 
@@ -111,7 +104,7 @@ python scripts/train.py --model_name resnet34_v8 --epochs 50
 ### Data Processing
 ```bash
 # Convert NetCDF to Zarr
-python scripts/netcdf_to_zarr.py
+python scripts/conversion.py
 
 # Reduce spatial resolution
 python scripts/coarsen.py
@@ -122,11 +115,10 @@ python scripts/rechunk.py
 
 ### Running the Application
 ```bash
-# Start web application with Docker
+# Start the monolith Streamlit app with Docker
 docker-compose up --build
 
-# Access frontend at http://localhost:8501
-# Access backend API at http://localhost:8000
+# Access the app at http://localhost:8501
 ```
 
 ## Testing
@@ -163,8 +155,7 @@ docker-compose up --build
 4. Document input/output data formats
 
 ### Modifying the Web Application
-- **Backend**: Update routes in `catalonia-wildfire-mvp/backend/src/api/routes.py`
-- **Frontend**: Modify `catalonia-wildfire-mvp/frontend/src/app.py`
+- **App**: Edit `docker/monolith/app.py` (Streamlit UI + inference + map rendering)
 - **Rebuild**: Run `docker-compose up --build` to test changes
 
 ## Important Notes
@@ -172,7 +163,7 @@ docker-compose up --build
 - GPU is recommended for training (CUDA or MPS)
 - Data files are large and stored locally in `data/` directory
 - The project uses coarsened data (32x spatial resolution) for faster experimentation
-- Model inference in the web app uses TorchScript serialized models
+- Model inference in the web app loads the `.pth` weights directly (via `src/models/cnn.py::build_unet`)
 - MLflow tracks all experiments and model versions
 
 ## Research Context

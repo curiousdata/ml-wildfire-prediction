@@ -13,11 +13,9 @@ This project uses convolutional neural networks (CNNs), specifically **U-Net arc
 ## Project Structure
 
 ```
-catalonia-wildfire-prediction/
-├── catalonia-wildfire-mvp/      # Web application (FastAPI + Streamlit)
-│   ├── backend/                 # API service for model inference
-│   └── frontend/                # Streamlit UI for predictions
+ml-wildfire-prediction/
 ├── data/                        # Datasets (NetCDF, Zarr formats)
+├── docker/monolith/             # Streamlit web app (model inference + map visualization)
 ├── notebooks/                   # Jupyter notebooks for EDA and experiments
 ├── scripts/                     # Training and data processing scripts
 │   ├── train.py                 # U-Net model training
@@ -235,7 +233,7 @@ This project builds upon the work of several researchers and open-source project
 - **segmentation_models_pytorch**: Pre-trained segmentation models
 - **MLflow**: Experiment tracking and model management
 - **xarray & Zarr**: Multi-dimensional array processing and storage
-- **FastAPI & Streamlit**: Web application framework
+- **Streamlit**: Web application framework
 
 ### Research Papers
 - **Long-tail learning via logit adjustment**: Menon, A. K., Jayasumana, S., Rawat, A. S., Jain, H., Veit, A., & Kumar, S. (2020). arXiv preprint arXiv:2007.07314. https://arxiv.org/abs/2007.07314

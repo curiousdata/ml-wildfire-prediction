@@ -1,7 +1,0 @@
-# --- Core UI ---
-streamlit
-requests
-
-# --- Mapping ---
-folium
-streamlit-folium
