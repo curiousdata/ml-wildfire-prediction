@@ -14,6 +14,11 @@ parser.add_argument(
     default=32,
     help="Coarsening factor for spatial dimensions (default: 32)",
 )
+parser.add_argument(
+    "--overwrite",
+    action="store_true",
+    help="Overwrite the output Zarr if it already exists (default: refuse).",
+)
 args = parser.parse_args()
 
 # Configuration
@@ -21,7 +26,8 @@ OLD_ZARR = Path("data/silver/IberFire.zarr")
 OUT_DIR = Path("data/gold")
 COARSEN_FACTOR = args.factor
 
-NEW_ZARR = OUT_DIR / f"IberFire_coarse{COARSEN_FACTOR}_time1.zarr"
+# Canonical name (matches scripts/train.py and the shipped gold artifact).
+NEW_ZARR = OUT_DIR / f"IberFire_coarse{COARSEN_FACTOR}.zarr"
 LABEL_VARS = ["is_fire"]
 
 COMPRESSOR = Blosc(cname="zstd", clevel=3, shuffle=2)
@@ -34,10 +40,10 @@ def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     if NEW_ZARR.exists():
-        resp = input(f"{NEW_ZARR} exists. Overwrite? [y/N]: ").strip().lower()
-        if resp not in ("y", "yes"):
-            print("Cancelled.")
-            return
+        if not args.overwrite:
+            raise SystemExit(
+                f"{NEW_ZARR} already exists. Re-run with --overwrite to replace it."
+            )
         shutil.rmtree(NEW_ZARR)
 
     ds = xr.open_zarr(OLD_ZARR, consolidated=True)

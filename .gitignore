@@ -33,7 +33,6 @@ dist/
 Thumbs.db
 data/IberFire_demo.csv
 data/IberFire_demo.parquet
-data/gold/IberFire_coarse8_time1.zarr
 data/silver/*.zarr
 
 
