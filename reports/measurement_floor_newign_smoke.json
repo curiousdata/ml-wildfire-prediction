@@ -1,0 +1,113 @@
+{
+  "split_dates": {
+    "train": [
+      "2008-01-01",
+      "2018-12-31"
+    ],
+    "val": [
+      "2019-01-01",
+      "2021-12-31"
+    ],
+    "test": [
+      "2022-01-01",
+      "2024-12-31"
+    ]
+  },
+  "n_features": 10,
+  "features": [
+    "FWI",
+    "VPD_peak",
+    "kbdi",
+    "ffwi",
+    "dist_to_fire",
+    "NDVI",
+    "t2m_max",
+    "RH_min",
+    "days_since_rain",
+    "elevation_mean"
+  ],
+  "test_rows": 2932,
+  "test_pos": 157,
+  "test_continuation_frac": 0.0,
+  "baselines": {
+    "fwi_alone": {
+      "overall": 0.05989170743434681,
+      "roc_auc": 0.522520227233603,
+      "base_rate": 0.05354706684856753,
+      "new_ignition_ap": 0.05989170743434681,
+      "new_ignition_n": 157,
+      "continuation_ap": null,
+      "continuation_n": 0
+    },
+    "logreg": {
+      "overall": 0.07653785801273993,
+      "roc_auc": 0.6407161301428816,
+      "base_rate": 0.05354706684856753,
+      "new_ignition_ap": 0.07653785801273993,
+      "new_ignition_n": 157,
+      "continuation_ap": null,
+      "continuation_n": 0
+    },
+    "hist_gbt": {
+      "overall": 0.3372906295629944,
+      "roc_auc": 0.7683640328226315,
+      "base_rate": 0.05354706684856753,
+      "new_ignition_ap": 0.3372906295629944,
+      "new_ignition_n": 157,
+      "continuation_ap": null,
+      "continuation_n": 0
+    }
+  },
+  "feature_importance": [
+    {
+      "feature": "dist_to_fire",
+      "importance": 0.3039091553556615,
+      "std": 0.00804821837700091
+    },
+    {
+      "feature": "NDVI",
+      "importance": 0.04970209197033496,
+      "std": 0.0038142162418925664
+    },
+    {
+      "feature": "VPD_peak",
+      "importance": 0.03171247989074927,
+      "std": 0.00785811557059243
+    },
+    {
+      "feature": "RH_min",
+      "importance": 0.01994376038991998,
+      "std": 0.004727419264052308
+    },
+    {
+      "feature": "kbdi",
+      "importance": 0.01385561926254214,
+      "std": 0.007166496654250036
+    },
+    {
+      "feature": "FWI",
+      "importance": 0.01244091324973301,
+      "std": 0.005620356131473087
+    },
+    {
+      "feature": "elevation_mean",
+      "importance": 0.003908823205342156,
+      "std": 0.0012941360668610195
+    },
+    {
+      "feature": "days_since_rain",
+      "importance": 0.0014177118286656798,
+      "std": 0.010947732391301142
+    },
+    {
+      "feature": "t2m_max",
+      "importance": -0.005982781291668811,
+      "std": 0.0027011761661436757
+    },
+    {
+      "feature": "ffwi",
+      "importance": -0.007598061349580391,
+      "std": 0.002341557103573969
+    }
+  ]
+}

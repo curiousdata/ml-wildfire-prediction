@@ -10,6 +10,35 @@ current dated entry — what was wrong, its impact, and the fix (or that it's fl
 
 ---
 
+## 2026-06-06 — Ignition vs. continuation: the two-regime analysis
+
+`scripts/measurement_floor.py --new-ignition` / `--continuation` split the label by whether a fire is within
+~1 cell at day t. Reports: `reports/measurement_floor_newign.json`, `..._contin.json`.
+
+**New ignition (far from fire; base 5.4%):** FWI 0.054 (ROC 0.47), LogReg 0.386, HistGBT **0.499**. Drivers:
+fuel/land-cover (`CLC_2018_27` #1, `scrub_proportion` #6, LAI, NDVI) + human access (`dist_to_roads_stdev` #2,
+`popdens_2020` #4) dominate; then fire-proneness, seasonal dryness (`precip_sum_90d`, `kbdi`), season, terrain.
+
+**Continuation / spread (near fire; base 14.5%):** FWI 0.189 (ROC 0.60), LogReg 0.581, HistGBT **0.606**. Drivers:
+`dist_to_fire` dominates (proximity), then weather (`t2m_max`, `LST`, `RH`), **wind/spread geometry**
+(`fire_upwind_exposure` #11, `wind_v_atmaxspeed`), dryness (`kbdi`, `precip_sum_30d`), fire history, season.
+
+### ⭐ Main insight — the EFFIS label is TWO physical processes with different drivers
+| | New ignition (far) | Continuation / spread (near) |
+|---|---|---|
+| base rate / HistGBT AP | 5.4% / **0.50** | 14.5% / **0.61** |
+| FWI ROC | 0.47 (worse-than-random) | 0.60 (weakly useful) |
+| dominant drivers | **fuel + human access** (land cover, roads, popdens) + dryness/season | **proximity + weather** (t2m/LST/RH hot-dry) + **wind** (upwind exposure, wind_v) + dryness |
+| the process | *where/whether a fire STARTS* — human-fuel-static | *whether a nearby fire REACHES here* — meteorological-dynamic |
+
+- **FWI is a fire-*weather* (spread-conditions) index** — weakly useful for spread, useless for ignition.
+- **Our engineered features split exactly as designed:** `fire_upwind_exposure` + wind → *spread*; WUI/roads/fuel →
+  *ignition*; fire-history / drought-memory / calendar → both. The upwind channel pays off in the regime it was built for.
+- **Implication:** one label, two regimes. Evaluate them separately (done); consider *modelling* them separately
+  (two heads / conditioning) — a single blended loss optimises the easy spread regime at the expense of the hard,
+  valuable ignition regime. The headline metric to beat remains **new-ignition AP ≈ 0.50**.
+- Caveats unchanged: point-wise GBT (not the spatial U-Net); permutation importance masks correlated groups.
+
 ## 2026-06-06 — Group A features materialized + measurement floor
 
 ### Group A SOTA gap-fill — all materialized onto the 4 km cube (now 285 vars)

@@ -1,0 +1,917 @@
+{
+  "split_dates": {
+    "train": [
+      "2008-01-01",
+      "2018-12-31"
+    ],
+    "val": [
+      "2019-01-01",
+      "2021-12-31"
+    ],
+    "test": [
+      "2022-01-01",
+      "2024-12-31"
+    ]
+  },
+  "n_features": 144,
+  "features": [
+    "CLC_2018_1",
+    "CLC_2018_10",
+    "CLC_2018_11",
+    "CLC_2018_12",
+    "CLC_2018_13",
+    "CLC_2018_14",
+    "CLC_2018_15",
+    "CLC_2018_16",
+    "CLC_2018_17",
+    "CLC_2018_18",
+    "CLC_2018_19",
+    "CLC_2018_2",
+    "CLC_2018_20",
+    "CLC_2018_21",
+    "CLC_2018_22",
+    "CLC_2018_23",
+    "CLC_2018_24",
+    "CLC_2018_25",
+    "CLC_2018_26",
+    "CLC_2018_27",
+    "CLC_2018_28",
+    "CLC_2018_29",
+    "CLC_2018_3",
+    "CLC_2018_30",
+    "CLC_2018_31",
+    "CLC_2018_32",
+    "CLC_2018_33",
+    "CLC_2018_34",
+    "CLC_2018_35",
+    "CLC_2018_36",
+    "CLC_2018_37",
+    "CLC_2018_38",
+    "CLC_2018_39",
+    "CLC_2018_4",
+    "CLC_2018_40",
+    "CLC_2018_41",
+    "CLC_2018_42",
+    "CLC_2018_43",
+    "CLC_2018_44",
+    "CLC_2018_5",
+    "CLC_2018_6",
+    "CLC_2018_7",
+    "CLC_2018_8",
+    "CLC_2018_9",
+    "CLC_2018_agricultural_proportion",
+    "CLC_2018_arable_land_proportion",
+    "CLC_2018_artificial_proportion",
+    "CLC_2018_artificial_vegetation_proportion",
+    "CLC_2018_forest_and_semi_natural_proportion",
+    "CLC_2018_forest_proportion",
+    "CLC_2018_heterogeneous_agriculture_proportion",
+    "CLC_2018_industrial_proportion",
+    "CLC_2018_inland_waters_proportion",
+    "CLC_2018_inland_wetlands_proportion",
+    "CLC_2018_marine_waters_proportion",
+    "CLC_2018_maritime_wetlands_proportion",
+    "CLC_2018_mine_proportion",
+    "CLC_2018_open_space_proportion",
+    "CLC_2018_permanent_crops_proportion",
+    "CLC_2018_scrub_proportion",
+    "CLC_2018_urban_fabric_proportion",
+    "CLC_2018_waterbody_proportion",
+    "CLC_2018_wetlands_proportion",
+    "FAPAR",
+    "FWI",
+    "HDW",
+    "LAI",
+    "LST",
+    "NDVI",
+    "RH_max",
+    "RH_mean",
+    "RH_min",
+    "RH_range",
+    "SWI_001",
+    "SWI_005",
+    "SWI_010",
+    "SWI_020",
+    "VPD_mean",
+    "VPD_peak",
+    "aspect_1",
+    "aspect_2",
+    "aspect_3",
+    "aspect_4",
+    "aspect_5",
+    "aspect_6",
+    "aspect_7",
+    "aspect_8",
+    "aspect_NODATA",
+    "aspect_eastness",
+    "aspect_southness",
+    "burn_frequency_365d",
+    "days_since_rain",
+    "dist_to_fire",
+    "dist_to_railways_mean",
+    "dist_to_railways_stdev",
+    "dist_to_roads_mean",
+    "dist_to_roads_stdev",
+    "dist_to_urban",
+    "dist_to_waterways_mean",
+    "dist_to_waterways_stdev",
+    "dow_cos",
+    "dow_sin",
+    "doy_cos",
+    "doy_sin",
+    "elevation_mean",
+    "elevation_stdev",
+    "emc_peak",
+    "ffwi",
+    "fire_upwind_exposure",
+    "fvc",
+    "hli",
+    "is_holiday",
+    "is_natura2000",
+    "is_waterbody",
+    "kbdi",
+    "lai_anomaly",
+    "ndvi_anomaly",
+    "popdens_2020",
+    "precip_sum_30d",
+    "precip_sum_7d",
+    "precip_sum_90d",
+    "roughness_mean",
+    "roughness_stdev",
+    "slope_mean",
+    "slope_stdev",
+    "spi_90d",
+    "surface_pressure_max",
+    "surface_pressure_mean",
+    "surface_pressure_min",
+    "surface_pressure_range",
+    "t2m_max",
+    "t2m_mean",
+    "t2m_min",
+    "t2m_range",
+    "terrain_curvature",
+    "time_since_last_fire",
+    "total_precipitation_mean",
+    "tpi",
+    "wind_speed_max",
+    "wind_speed_mean",
+    "wind_u_atmaxspeed",
+    "wind_u_mean",
+    "wind_v_atmaxspeed",
+    "wind_v_mean"
+  ],
+  "test_rows": 60319,
+  "test_pos": 3229,
+  "test_continuation_frac": 0.0,
+  "baselines": {
+    "fwi_alone": {
+      "overall": 0.054347021052901276,
+      "roc_auc": 0.4739625474406192,
+      "base_rate": 0.0535320545765016,
+      "new_ignition_ap": 0.054347021052901276,
+      "new_ignition_n": 3229,
+      "continuation_ap": null,
+      "continuation_n": 0
+    },
+    "logreg": {
+      "overall": 0.3857902410290069,
+      "roc_auc": 0.8990262911743998,
+      "base_rate": 0.0535320545765016,
+      "new_ignition_ap": 0.3857902410290069,
+      "new_ignition_n": 3229,
+      "continuation_ap": null,
+      "continuation_n": 0
+    },
+    "hist_gbt": {
+      "overall": 0.49920929302920186,
+      "roc_auc": 0.9235371055172458,
+      "base_rate": 0.0535320545765016,
+      "new_ignition_ap": 0.49920929302920186,
+      "new_ignition_n": 3229,
+      "continuation_ap": null,
+      "continuation_n": 0
+    }
+  },
+  "feature_importance": [
+    {
+      "feature": "CLC_2018_27",
+      "importance": 0.08248695073988416,
+      "std": 0.006213720767562994
+    },
+    {
+      "feature": "dist_to_roads_stdev",
+      "importance": 0.07181404405729906,
+      "std": 0.003939258777974734
+    },
+    {
+      "feature": "dist_to_fire",
+      "importance": 0.045753501170874476,
+      "std": 0.0029087505788286967
+    },
+    {
+      "feature": "popdens_2020",
+      "importance": 0.042423159790595966,
+      "std": 0.0026855646234594907
+    },
+    {
+      "feature": "elevation_stdev",
+      "importance": 0.02153688603081268,
+      "std": 0.0025649183539333807
+    },
+    {
+      "feature": "CLC_2018_scrub_proportion",
+      "importance": 0.016520535514948958,
+      "std": 0.0026823243913619496
+    },
+    {
+      "feature": "precip_sum_90d",
+      "importance": 0.013412012815298432,
+      "std": 0.0005747721319979229
+    },
+    {
+      "feature": "burn_frequency_365d",
+      "importance": 0.010740525798305903,
+      "std": 0.0006515946515342761
+    },
+    {
+      "feature": "CLC_2018_24",
+      "importance": 0.009033236850179685,
+      "std": 0.0020410354280169622
+    },
+    {
+      "feature": "doy_cos",
+      "importance": 0.008479259115827495,
+      "std": 0.006877246284069758
+    },
+    {
+      "feature": "time_since_last_fire",
+      "importance": 0.006681233061837173,
+      "std": 0.0016565826714165766
+    },
+    {
+      "feature": "LAI",
+      "importance": 0.0057205558102477,
+      "std": 0.002641067535890174
+    },
+    {
+      "feature": "CLC_2018_22",
+      "importance": 0.005583798951614279,
+      "std": 0.0025325004558655623
+    },
+    {
+      "feature": "kbdi",
+      "importance": 0.004636177393440244,
+      "std": 0.0007402099437699486
+    },
+    {
+      "feature": "CLC_2018_18",
+      "importance": 0.0042445677727424025,
+      "std": 0.0005258065264643734
+    },
+    {
+      "feature": "doy_sin",
+      "importance": 0.004169919515075504,
+      "std": 0.0019945205365732663
+    },
+    {
+      "feature": "surface_pressure_max",
+      "importance": 0.004083308078999814,
+      "std": 0.0007077350956896551
+    },
+    {
+      "feature": "wind_u_atmaxspeed",
+      "importance": 0.0039743048899457305,
+      "std": 0.000722445820316366
+    },
+    {
+      "feature": "RH_range",
+      "importance": 0.003904538636531655,
+      "std": 0.0010249729191813175
+    },
+    {
+      "feature": "NDVI",
+      "importance": 0.0038393166061178783,
+      "std": 0.0008950031534741805
+    },
+    {
+      "feature": "dist_to_urban",
+      "importance": 0.0038142934836815265,
+      "std": 0.0007392257185527837
+    },
+    {
+      "feature": "SWI_010",
+      "importance": 0.0035600684826014493,
+      "std": 0.0009962021908680161
+    },
+    {
+      "feature": "days_since_rain",
+      "importance": 0.003439304872320507,
+      "std": 0.0005081196315284235
+    },
+    {
+      "feature": "CLC_2018_forest_and_semi_natural_proportion",
+      "importance": 0.003203001844257295,
+      "std": 0.0019080016367863772
+    },
+    {
+      "feature": "CLC_2018_13",
+      "importance": 0.00276229884977978,
+      "std": 0.0013287546056528498
+    },
+    {
+      "feature": "aspect_3",
+      "importance": 0.0027468679448390634,
+      "std": 0.0007222683862017377
+    },
+    {
+      "feature": "SWI_020",
+      "importance": 0.002727473903500736,
+      "std": 0.0009527067312389471
+    },
+    {
+      "feature": "elevation_mean",
+      "importance": 0.002579071101544724,
+      "std": 0.0003731898245344472
+    },
+    {
+      "feature": "CLC_2018_arable_land_proportion",
+      "importance": 0.0025753195675447538,
+      "std": 0.0009940461270189426
+    },
+    {
+      "feature": "t2m_mean",
+      "importance": 0.002489692329280424,
+      "std": 0.0007057469387606154
+    },
+    {
+      "feature": "fire_upwind_exposure",
+      "importance": 0.0021192028905045643,
+      "std": 0.0013160195688393845
+    },
+    {
+      "feature": "aspect_1",
+      "importance": 0.0021152536832025706,
+      "std": 0.0003945685566789213
+    },
+    {
+      "feature": "aspect_7",
+      "importance": 0.0018864223274781173,
+      "std": 0.00046542108116541796
+    },
+    {
+      "feature": "ndvi_anomaly",
+      "importance": 0.0018578297760625622,
+      "std": 0.00088950263198
+    },
+    {
+      "feature": "CLC_2018_15",
+      "importance": 0.0016837193648751765,
+      "std": 0.0006016923290113919
+    },
+    {
+      "feature": "dist_to_waterways_mean",
+      "importance": 0.0016407410750898614,
+      "std": 0.0014541148503074827
+    },
+    {
+      "feature": "CLC_2018_28",
+      "importance": 0.0015497235903955502,
+      "std": 0.0015056892081224153
+    },
+    {
+      "feature": "surface_pressure_range",
+      "importance": 0.0014805158989807203,
+      "std": 0.00033013082529565363
+    },
+    {
+      "feature": "dist_to_railways_stdev",
+      "importance": 0.0013237157890290858,
+      "std": 0.0004381644731314675
+    },
+    {
+      "feature": "SWI_005",
+      "importance": 0.0012461184737731317,
+      "std": 0.0011041844640532282
+    },
+    {
+      "feature": "CLC_2018_20",
+      "importance": 0.0009580294373896144,
+      "std": 0.0004826354694621115
+    },
+    {
+      "feature": "CLC_2018_forest_proportion",
+      "importance": 0.0007245332773712088,
+      "std": 0.0004997653972054443
+    },
+    {
+      "feature": "surface_pressure_min",
+      "importance": 0.0007080918345398665,
+      "std": 0.0008146523178583172
+    },
+    {
+      "feature": "wind_speed_mean",
+      "importance": 0.0007044911807512211,
+      "std": 0.0005092092479164749
+    },
+    {
+      "feature": "lai_anomaly",
+      "importance": 0.0007041364725204335,
+      "std": 0.0010872967483108742
+    },
+    {
+      "feature": "CLC_2018_2",
+      "importance": 0.0006929863136154365,
+      "std": 0.000623901709335499
+    },
+    {
+      "feature": "CLC_2018_17",
+      "importance": 0.0006649227723618164,
+      "std": 0.0005811134295052428
+    },
+    {
+      "feature": "dist_to_railways_mean",
+      "importance": 0.0005945139826637099,
+      "std": 0.00021025303156143444
+    },
+    {
+      "feature": "CLC_2018_21",
+      "importance": 0.000584000874386296,
+      "std": 0.00031229779413290024
+    },
+    {
+      "feature": "is_natura2000",
+      "importance": 0.00047963877817928474,
+      "std": 9.813073753379841e-05
+    },
+    {
+      "feature": "aspect_NODATA",
+      "importance": 0.0004488758897657578,
+      "std": 0.0004727722872022361
+    },
+    {
+      "feature": "wind_speed_max",
+      "importance": 0.00043246332076266974,
+      "std": 0.0004705746147480532
+    },
+    {
+      "feature": "CLC_2018_12",
+      "importance": 0.00042502568634443055,
+      "std": 0.00013285794236149483
+    },
+    {
+      "feature": "CLC_2018_industrial_proportion",
+      "importance": 0.0003693317482447167,
+      "std": 0.000268659562582907
+    },
+    {
+      "feature": "slope_mean",
+      "importance": 0.00035420763407715644,
+      "std": 0.00010542759318799717
+    },
+    {
+      "feature": "aspect_2",
+      "importance": 0.00034208627788330964,
+      "std": 0.00020795349744635451
+    },
+    {
+      "feature": "CLC_2018_23",
+      "importance": 0.00032120942380686746,
+      "std": 0.0005698276124005122
+    },
+    {
+      "feature": "CLC_2018_26",
+      "importance": 0.00031592040097035606,
+      "std": 0.00011013684513286242
+    },
+    {
+      "feature": "roughness_mean",
+      "importance": 0.00030212786297153144,
+      "std": 0.00029850056477047045
+    },
+    {
+      "feature": "dist_to_roads_mean",
+      "importance": 0.0002820084625740904,
+      "std": 0.00013056809064070687
+    },
+    {
+      "feature": "CLC_2018_heterogeneous_agriculture_proportion",
+      "importance": 0.00027380990281370793,
+      "std": 0.00019137392486691574
+    },
+    {
+      "feature": "CLC_2018_6",
+      "importance": 0.0002682428077180517,
+      "std": 0.0002844041467230979
+    },
+    {
+      "feature": "CLC_2018_32",
+      "importance": 0.000262784660311192,
+      "std": 9.194843891291511e-05
+    },
+    {
+      "feature": "dow_cos",
+      "importance": 0.0002474644679808513,
+      "std": 6.222781011572228e-05
+    },
+    {
+      "feature": "tpi",
+      "importance": 0.00022989994724979349,
+      "std": 0.00022296135194516052
+    },
+    {
+      "feature": "is_holiday",
+      "importance": 0.00014227656995657867,
+      "std": 9.742334149222634e-06
+    },
+    {
+      "feature": "CLC_2018_4",
+      "importance": 0.0001355539785552473,
+      "std": 9.797166250253162e-05
+    },
+    {
+      "feature": "CLC_2018_31",
+      "importance": 0.00011489328843065454,
+      "std": 0.00020926203072236166
+    },
+    {
+      "feature": "CLC_2018_mine_proportion",
+      "importance": 0.0001060695807964344,
+      "std": 6.592263704728707e-05
+    },
+    {
+      "feature": "CLC_2018_artificial_proportion",
+      "importance": 9.952736523381282e-05,
+      "std": 6.432258758595316e-05
+    },
+    {
+      "feature": "CLC_2018_1",
+      "importance": 8.145317185333696e-05,
+      "std": 0.00010133345621390202
+    },
+    {
+      "feature": "CLC_2018_urban_fabric_proportion",
+      "importance": 7.054407933930011e-05,
+      "std": 6.299374363496362e-06
+    },
+    {
+      "feature": "CLC_2018_3",
+      "importance": 5.4522251947575207e-05,
+      "std": 6.304526782731134e-05
+    },
+    {
+      "feature": "wind_v_mean",
+      "importance": 4.718155367622323e-05,
+      "std": 0.00013506363974945785
+    },
+    {
+      "feature": "CLC_2018_30",
+      "importance": 2.046559912856812e-05,
+      "std": 7.1892427176855135e-06
+    },
+    {
+      "feature": "CLC_2018_inland_waters_proportion",
+      "importance": 1.882729564972596e-05,
+      "std": 1.9169925064492193e-05
+    },
+    {
+      "feature": "dow_sin",
+      "importance": 1.7587476349463966e-05,
+      "std": 0.0003519134894307612
+    },
+    {
+      "feature": "CLC_2018_19",
+      "importance": 7.922938175160729e-07,
+      "std": 6.34305132985726e-07
+    },
+    {
+      "feature": "CLC_2018_40",
+      "importance": 0.0,
+      "std": 0.0
+    },
+    {
+      "feature": "CLC_2018_5",
+      "importance": 0.0,
+      "std": 0.0
+    },
+    {
+      "feature": "CLC_2018_44",
+      "importance": 0.0,
+      "std": 0.0
+    },
+    {
+      "feature": "CLC_2018_43",
+      "importance": 0.0,
+      "std": 0.0
+    },
+    {
+      "feature": "CLC_2018_42",
+      "importance": 0.0,
+      "std": 0.0
+    },
+    {
+      "feature": "CLC_2018_14",
+      "importance": 0.0,
+      "std": 0.0
+    },
+    {
+      "feature": "CLC_2018_38",
+      "importance": 0.0,
+      "std": 0.0
+    },
+    {
+      "feature": "CLC_2018_39",
+      "importance": 0.0,
+      "std": 0.0
+    },
+    {
+      "feature": "CLC_2018_9",
+      "importance": 0.0,
+      "std": 0.0
+    },
+    {
+      "feature": "CLC_2018_36",
+      "importance": 0.0,
+      "std": 0.0
+    },
+    {
+      "feature": "CLC_2018_35",
+      "importance": 0.0,
+      "std": 0.0
+    },
+    {
+      "feature": "CLC_2018_34",
+      "importance": 0.0,
+      "std": 0.0
+    },
+    {
+      "feature": "fvc",
+      "importance": 0.0,
+      "std": 0.0
+    },
+    {
+      "feature": "is_waterbody",
+      "importance": 0.0,
+      "std": 0.0
+    },
+    {
+      "feature": "CLC_2018_7",
+      "importance": 0.0,
+      "std": 0.0
+    },
+    {
+      "feature": "CLC_2018_8",
+      "importance": 0.0,
+      "std": 0.0
+    },
+    {
+      "feature": "CLC_2018_marine_waters_proportion",
+      "importance": 0.0,
+      "std": 0.0
+    },
+    {
+      "feature": "CLC_2018_inland_wetlands_proportion",
+      "importance": 0.0,
+      "std": 0.0
+    },
+    {
+      "feature": "CLC_2018_10",
+      "importance": 0.0,
+      "std": 0.0
+    },
+    {
+      "feature": "CLC_2018_maritime_wetlands_proportion",
+      "importance": 0.0,
+      "std": 0.0
+    },
+    {
+      "feature": "CLC_2018_wetlands_proportion",
+      "importance": 0.0,
+      "std": 0.0
+    },
+    {
+      "feature": "CLC_2018_37",
+      "importance": -4.881253245418253e-06,
+      "std": 1.5485758791158478e-07
+    },
+    {
+      "feature": "CLC_2018_waterbody_proportion",
+      "importance": -7.437321839609545e-06,
+      "std": 0.000213355516208296
+    },
+    {
+      "feature": "terrain_curvature",
+      "importance": -2.8571195825296176e-05,
+      "std": 5.917484106660904e-06
+    },
+    {
+      "feature": "CLC_2018_16",
+      "importance": -3.0022421995642052e-05,
+      "std": 3.8668492185355145e-05
+    },
+    {
+      "feature": "CLC_2018_artificial_vegetation_proportion",
+      "importance": -3.5531658818051724e-05,
+      "std": 2.5410251510357722e-05
+    },
+    {
+      "feature": "aspect_4",
+      "importance": -0.0001420704510609605,
+      "std": 0.00012418142396219574
+    },
+    {
+      "feature": "CLC_2018_41",
+      "importance": -0.00015120548600222605,
+      "std": 0.0006882093918511826
+    },
+    {
+      "feature": "aspect_5",
+      "importance": -0.00020817634040100805,
+      "std": 0.0005037820765206752
+    },
+    {
+      "feature": "aspect_8",
+      "importance": -0.0002196003304660484,
+      "std": 0.0004244968542159488
+    },
+    {
+      "feature": "aspect_eastness",
+      "importance": -0.0002803367860888158,
+      "std": 0.00019123810163675526
+    },
+    {
+      "feature": "CLC_2018_11",
+      "importance": -0.0003018709794271694,
+      "std": 0.00029847487428134265
+    },
+    {
+      "feature": "CLC_2018_permanent_crops_proportion",
+      "importance": -0.0003231573835797974,
+      "std": 0.0007485122284371746
+    },
+    {
+      "feature": "CLC_2018_25",
+      "importance": -0.0003708287517183069,
+      "std": 0.0004044715567901565
+    },
+    {
+      "feature": "LST",
+      "importance": -0.00037366727382555826,
+      "std": 0.0006182816438653096
+    },
+    {
+      "feature": "aspect_southness",
+      "importance": -0.0003812891538378012,
+      "std": 0.00019354787873306916
+    },
+    {
+      "feature": "roughness_stdev",
+      "importance": -0.0006088905923016252,
+      "std": 0.00039199133316030664
+    },
+    {
+      "feature": "CLC_2018_agricultural_proportion",
+      "importance": -0.000608912375935374,
+      "std": 0.0009842735518401113
+    },
+    {
+      "feature": "wind_u_mean",
+      "importance": -0.0006512842569069699,
+      "std": 0.0004013414476607941
+    },
+    {
+      "feature": "t2m_max",
+      "importance": -0.000654813827752195,
+      "std": 0.00024018651353427728
+    },
+    {
+      "feature": "surface_pressure_mean",
+      "importance": -0.0006832447545934706,
+      "std": 0.0008026664845428084
+    },
+    {
+      "feature": "dist_to_waterways_stdev",
+      "importance": -0.0007677188558344131,
+      "std": 0.0005510141541878004
+    },
+    {
+      "feature": "CLC_2018_open_space_proportion",
+      "importance": -0.0007705094210661937,
+      "std": 0.0005170614515599943
+    },
+    {
+      "feature": "wind_v_atmaxspeed",
+      "importance": -0.0010241682927677835,
+      "std": 0.0004821962203357257
+    },
+    {
+      "feature": "aspect_6",
+      "importance": -0.0011480089922233372,
+      "std": 0.00017825780720978835
+    },
+    {
+      "feature": "FWI",
+      "importance": -0.0011546748671983353,
+      "std": 0.0019633810513912018
+    },
+    {
+      "feature": "CLC_2018_29",
+      "importance": -0.0011698713735101378,
+      "std": 0.00013111358129295475
+    },
+    {
+      "feature": "VPD_peak",
+      "importance": -0.00132853163908897,
+      "std": 0.0002061221177042618
+    },
+    {
+      "feature": "t2m_min",
+      "importance": -0.001368710594567853,
+      "std": 0.0004927449510178237
+    },
+    {
+      "feature": "FAPAR",
+      "importance": -0.0014065619854561155,
+      "std": 0.0014510292294311782
+    },
+    {
+      "feature": "emc_peak",
+      "importance": -0.001431622906900724,
+      "std": 0.0002528818792833722
+    },
+    {
+      "feature": "RH_max",
+      "importance": -0.0016256011405154276,
+      "std": 0.000294994497316553
+    },
+    {
+      "feature": "hli",
+      "importance": -0.0016909824990235152,
+      "std": 0.0005984714149328157
+    },
+    {
+      "feature": "ffwi",
+      "importance": -0.001849065179246841,
+      "std": 0.00020368850991337416
+    },
+    {
+      "feature": "HDW",
+      "importance": -0.00192902696236034,
+      "std": 0.00011021263566514304
+    },
+    {
+      "feature": "slope_stdev",
+      "importance": -0.001983975843740845,
+      "std": 0.0003024047584734148
+    },
+    {
+      "feature": "spi_90d",
+      "importance": -0.0021350839108364252,
+      "std": 0.0013874490254990757
+    },
+    {
+      "feature": "RH_min",
+      "importance": -0.0024725216947289277,
+      "std": 0.0005931550669409012
+    },
+    {
+      "feature": "precip_sum_30d",
+      "importance": -0.002564412455231535,
+      "std": 0.00041639885479285657
+    },
+    {
+      "feature": "total_precipitation_mean",
+      "importance": -0.0026190614993179353,
+      "std": 0.0016983116960385207
+    },
+    {
+      "feature": "VPD_mean",
+      "importance": -0.0028076641568033356,
+      "std": 0.0010906869555024703
+    },
+    {
+      "feature": "precip_sum_7d",
+      "importance": -0.0028456707749549373,
+      "std": 0.0013316042161556014
+    },
+    {
+      "feature": "CLC_2018_33",
+      "importance": -0.0032769066944270397,
+      "std": 0.0006327092341883654
+    },
+    {
+      "feature": "t2m_range",
+      "importance": -0.004023722754893526,
+      "std": 0.0013216407910337795
+    },
+    {
+      "feature": "SWI_001",
+      "importance": -0.005265973147466389,
+      "std": 0.0020802301515713616
+    },
+    {
+      "feature": "RH_mean",
+      "importance": -0.006729184747846562,
+      "std": 0.0020233779061344537
+    }
+  ]
+}

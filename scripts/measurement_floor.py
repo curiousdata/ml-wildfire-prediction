@@ -51,21 +51,35 @@ def select_features(c: xr.Dataset) -> list[str]:
     return sorted(feats)
 
 
-def build_samples(c, is_fire, dist_to_fire, t0, t1, neg_ratio, max_rows, rng, cell_km, smoke):
-    """Return (t_idx, i_idx, j_idx, y, continuation) sample arrays for a split."""
+def build_samples(c, is_fire, dist_to_fire, t0, t1, neg_ratio, max_rows, rng, cell_km, smoke,
+                  new_ignition=False, continuation=False):
+    """Return (t_idx, i_idx, j_idx, y, continuation) sample arrays for a split.
+
+    new_ignition=True restricts to cells with NO fire within ~1 cell at day t
+    (dist_to_fire(t) > 1.5*cell) — "what ignites tomorrow far from any active fire?"
+    continuation=True restricts to cells WITH fire within ~1 cell at t (dist <= 1.5*cell)
+    — the persistence/spread regime: "given fire nearby now, does it reach here tomorrow?"
+    """
     time = c["time"].values
     in_split = np.where((time >= np.datetime64(t0)) & (time <= np.datetime64(t1)))[0]
     in_split = in_split[in_split < len(time) - 1]  # need t+1
     if smoke:
         in_split = in_split[::20]
     land = np.isfinite(c["t2m_mean"].isel(time=int(in_split[0])).values)  # (y,x) land mask
+    far_thresh = 1.5 * cell_km
 
     pos_t, pos_i, pos_j, neg_t, neg_i, neg_j = [], [], [], [], [], []
     for t in in_split:
         lbl = is_fire[t + 1]
-        pi, pj = np.where((lbl > 0) & land)
+        if new_ignition:
+            elig = land & (dist_to_fire[t] > far_thresh)
+        elif continuation:
+            elig = land & (dist_to_fire[t] <= far_thresh)
+        else:
+            elig = land
+        pi, pj = np.where((lbl > 0) & elig)
         pos_t.append(np.full(pi.size, t)); pos_i.append(pi); pos_j.append(pj)
-        ni, nj = np.where((lbl == 0) & land)
+        ni, nj = np.where((lbl == 0) & elig)
         if ni.size:
             k = min(ni.size, max(1, neg_ratio * max(pi.size, 1)))
             sel = rng.choice(ni.size, size=k, replace=False)
@@ -122,7 +136,13 @@ def main() -> None:
     ap.add_argument("--smoke", action="store_true")
     ap.add_argument("--neg-ratio", type=int, default=15)
     ap.add_argument("--max-train", type=int, default=300_000)
+    ap.add_argument("--new-ignition", action="store_true",
+                    help="Restrict to cells with no fire nearby at t (isolate new-ignition drivers).")
+    ap.add_argument("--continuation", action="store_true",
+                    help="Restrict to cells WITH fire nearby at t (persistence/spread drivers).")
     args = ap.parse_args()
+    if args.new_ignition and args.continuation:
+        ap.error("choose at most one of --new-ignition / --continuation")
     REPORTS.mkdir(exist_ok=True)
     rng = np.random.default_rng(42)
 
@@ -141,7 +161,9 @@ def main() -> None:
     data = {}
     for split, (t0, t1) in SPLITS.items():
         ti, ii, jj, y, cont = build_samples(c, is_fire, dist_to_fire, t0, t1,
-                                             args.neg_ratio, max_rows[split], rng, cell_km, args.smoke)
+                                             args.neg_ratio, max_rows[split], rng, cell_km, args.smoke,
+                                             new_ignition=args.new_ignition,
+                                             continuation=args.continuation)
         X = extract_matrix(c, feats, ti, ii, jj)
         data[split] = dict(X=X, y=y, cont=cont,
                            fwi=X[:, feats.index("FWI")] if "FWI" in feats else np.zeros_like(y, float))
@@ -193,7 +215,8 @@ def main() -> None:
          "std": float(pi.importances_std[k])} for k in order
     ]
 
-    out = REPORTS / ("measurement_floor_smoke.json" if args.smoke else "measurement_floor.json")
+    tag = ("_newign" if args.new_ignition else "_contin" if args.continuation else "") + ("_smoke" if args.smoke else "")
+    out = REPORTS / f"measurement_floor{tag}.json"
     out.write_text(json.dumps(report, indent=2))
     print("\n===== BASELINE PR-AUC (test) =====", flush=True)
     for name, m in report["baselines"].items():

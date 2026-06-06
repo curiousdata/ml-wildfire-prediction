@@ -1,0 +1,113 @@
+{
+  "split_dates": {
+    "train": [
+      "2008-01-01",
+      "2018-12-31"
+    ],
+    "val": [
+      "2019-01-01",
+      "2021-12-31"
+    ],
+    "test": [
+      "2022-01-01",
+      "2024-12-31"
+    ]
+  },
+  "n_features": 10,
+  "features": [
+    "FWI",
+    "VPD_peak",
+    "kbdi",
+    "ffwi",
+    "dist_to_fire",
+    "NDVI",
+    "t2m_max",
+    "RH_min",
+    "days_since_rain",
+    "elevation_mean"
+  ],
+  "test_rows": 1576,
+  "test_pos": 210,
+  "test_continuation_frac": 1.0,
+  "baselines": {
+    "fwi_alone": {
+      "overall": 0.14694741317893423,
+      "roc_auc": 0.5436188384577844,
+      "base_rate": 0.13324873096446702,
+      "new_ignition_ap": null,
+      "new_ignition_n": 0,
+      "continuation_ap": 0.14694741317893423,
+      "continuation_n": 210
+    },
+    "logreg": {
+      "overall": 0.5050883002827679,
+      "roc_auc": 0.850878477306003,
+      "base_rate": 0.13324873096446702,
+      "new_ignition_ap": null,
+      "new_ignition_n": 0,
+      "continuation_ap": 0.5050883002827679,
+      "continuation_n": 210
+    },
+    "hist_gbt": {
+      "overall": 0.3173382707240381,
+      "roc_auc": 0.7330213344488601,
+      "base_rate": 0.13324873096446702,
+      "new_ignition_ap": null,
+      "new_ignition_n": 0,
+      "continuation_ap": 0.3173382707240381,
+      "continuation_n": 210
+    }
+  },
+  "feature_importance": [
+    {
+      "feature": "dist_to_fire",
+      "importance": 0.2794955391972688,
+      "std": 0.0007220761390579846
+    },
+    {
+      "feature": "elevation_mean",
+      "importance": 0.09188771083932334,
+      "std": 0.009811192325140251
+    },
+    {
+      "feature": "t2m_max",
+      "importance": 0.049675603042613294,
+      "std": 0.006204546357039078
+    },
+    {
+      "feature": "days_since_rain",
+      "importance": 0.02471174511700643,
+      "std": 0.0020426745771536733
+    },
+    {
+      "feature": "ffwi",
+      "importance": -0.002681788395729597,
+      "std": 0.0060406879910225005
+    },
+    {
+      "feature": "kbdi",
+      "importance": -0.006427646466871643,
+      "std": 0.0045962296375480745
+    },
+    {
+      "feature": "RH_min",
+      "importance": -0.01494985582717647,
+      "std": 0.0021821551268469915
+    },
+    {
+      "feature": "VPD_peak",
+      "importance": -0.036163936274471564,
+      "std": 0.013476479784900177
+    },
+    {
+      "feature": "FWI",
+      "importance": -0.045906385841408014,
+      "std": 0.021879580974833827
+    },
+    {
+      "feature": "NDVI",
+      "importance": -0.07704824088775714,
+      "std": 0.020188326217835915
+    }
+  ]
+}
