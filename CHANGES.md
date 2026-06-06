@@ -10,6 +10,77 @@ current dated entry — what was wrong, its impact, and the fix (or that it's fl
 
 ---
 
+## 2026-06-06 — v5 wide-and-deep CONFIRMS the diagnosis: point-wise branch lifts ignition (interim)
+
+Built the wide-and-deep variant (`WideDeepUNet` in `src/models/cnn.py` + `--wide` in train.py): the v4
+deep U-Net (unchanged) plus a **zero-initialized point-wise 1×1 branch** (per-pixel MLP, 146→128→64→1,
+27.5K params = 0.11% of the model), fused **additively** on logits. Zero-init verified — an untrained
+WideDeepUNet is bit-for-bit the deep baseline, so it can only *add* signal. Same config as v4 (focal-mass
+loss, lr 5e-5, α 0.6, oversample 3, GroupNorm) except **batch 8** (see swap note below).
+
+**Result (interim, through epoch 7; v5 still training, best @ epoch 6):**
+
+| metric | v5 wide-deep | v4 deep-only | GBT floor |
+|---|---|---|---|
+| new-ign AP | **~0.37 plateau** (best 0.386) | ~0.32 (best 0.358) | 0.50 |
+| **prec@K** (R-precision) | **~0.32** | ~0.10 | — |
+| spread AP | 0.98–0.99 (retained) | 0.99 | ~0.98 |
+| val_blend (best) | **0.626** | 0.611 | — |
+
+**The diagnosis holds.** Adding a downsample-free, single-cell-receptive-field pathway lifted ignition
+above the deep-only ceiling — new-ign broke v4's entire range by epoch 4 and settled ~0.37 (≈75% of the
+GBT floor, up from ~64%). The lift is **modest on full-curve AP (+~0.05) but large on top-rank precision
+(prec@K ~3×)** — consistent with the mechanism: the point-wise branch sharpens the *confident top* of the
+ranking (the obvious, feature-driven ignitions), while the **stochastic ignition tail** (human/lightning
+triggers absent from the features) still caps full-curve AP near 0.37, well short of 0.50. That residual
+is likely **partly irreducible**, not an architecture gap. For an operational risk map, prec@K ("of the
+cells we'd flag, how many burn") is the more meaningful metric — and it tripled.
+
+**Next:** let v5 finish; run per-regime feature importance (cluster + day-level n/2 stability) on the wide
+branch (its point-wise attributions are GBT-comparable) to learn ignition drivers; decide v6 from there.
+
+### Bugs found & fixed
+- **Wide branch re-triggered hard swap at batch 16** *(found → fixed)*. The 1×1 branch is tiny in params
+  but runs at FULL 230×297 resolution; its 128/64-channel activations (~840 MB at batch 16) tipped the
+  already-edge memory into active disk swap (5484 swapouts/s, 939 s/epoch). Fixed by dropping to **batch 8**
+  (halves all activations, free under GroupNorm) → swapouts 0, ~830 s/epoch.
+
+## 2026-06-06 — torch.compile on MPS: hangs on our 2.9.1, but 2.12's Metal Inductor backend works
+
+Benchmarked compile modes on our stack and looked into whether newer PyTorch changes the picture
+(`scripts/bench_compile.py`, subprocess-isolated with per-mode timeouts so a hang is killed, not blocking).
+
+**On installed torch 2.9.1 (wide-deep model, batch 8, MPS):**
+
+| mode | result |
+|---|---|
+| eager | 1.40 s/step |
+| aot_eager | 1.43 s/step (no gain — traces autograd, runs eager, no fusion) |
+| default (inductor) | **HANG** (killed at 180 s) |
+| reduce-overhead | **HANG** (killed at 180 s) |
+
+Cause: 2.9.1's Inductor has **no Metal codegen backend** — its targets are Triton (CUDA) and C++ (CPU),
+so on MPS it slides into a CPU-compile/autotune path that stalls on macOS. `aot_eager` works only because
+it skips Inductor entirely (and so gives no speedup). **Verdict: eager is correct on 2.9.1.**
+
+**Did newer PyTorch change it? Yes.** Latest stable is **2.12 (May 13, 2026)**; it added a Metal Inductor
+backend (`torch/_inductor/codegen/mps.py`, `MetalKernel`). Tested in an isolated `/tmp` venv (torch 2.12,
+small conv+GroupNorm+GELU probe, MPS):
+
+| mode | first (compile) | steady median | steady min |
+|---|---|---|---|
+| eager | 3.4 s | 44.7 ms | 42.9 ms |
+| default (inductor) | 3.6 s | 53.2 ms (noisy) | 29.5 ms |
+| reduce-overhead | 2.5 s | **35.1 ms (~21% faster)** | 31.4 ms |
+
+**Inductor no longer hangs on 2.12** — it compiles in seconds and runs; `reduce-overhead` is ~21% faster
+than eager on the probe. Caveats: small probe (not the real model), measured under concurrent v5 GPU
+contention, and the Metal backend is still prototype (codegen bugs on larger graphs). **Action (deferred):**
+after the wide-deep experiment, do a controlled migration test — install repo deps in the 2.12 venv, run the
+*real* `build_wide_deep_unet` through the timeout-guarded bench with training stopped; if it compiles cleanly
+and reduce-overhead beats eager, migrate to 2.12 for ~20% faster training. Not mid-experiment (keeps the
+v4-vs-v5 comparison on one stack; reproducibility).
+
 ## 2026-06-06 — v4 baseline established: spread solved, ignition plateaus below GBT (architecture-bound)
 
 Ran `seg_coarse4_focal_v4` (focal-mass loss, lr 5e-5, batch 16, α 0.6, oversample 3, GroupNorm,
