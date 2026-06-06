@@ -10,6 +10,115 @@ current dated entry — what was wrong, its impact, and the fix (or that it's fl
 
 ---
 
+## 2026-06-06 — First training run collapsed; focal loss is the fix (diagnosed, not guessed)
+
+The first real run (logit-adjusted BCE, lr 3e-5) **failed to learn** — val AP ≈ 0 in *both* regimes and
+val ROC < 0.5 (worse than chance). Rather than tweak blindly, I ran an **overfit-a-tiny-batch diagnostic**
+(`scripts/diag_overfit.py`): grab 8 fire-containing days (13 fire pixels total) and try to *memorize* them.
+A model that can't overfit 13 pixels has a broken loss/gradient, not a capacity or data problem. The test
+A/B's four recipes and reports train AP + mean predicted prob on fire vs no-fire cells:
+
+| recipe | train AP | ROC | meanP fire vs no-fire |
+|---|---|---|---|
+| current (logit-adj BCE, lr 3e-5) | **0.00** | 0.75 | 0.668 vs 0.634 |
+| lr 1e-4 | **0.00** | 0.72 | 0.648 vs 0.620 |
+| **focal γ=2 (lr 1e-4)** | **0.77** | **1.00** | **1.000 vs 0.661** |
+| tempered adjustment (lr 1e-4) | 0.00 | 0.64 | 0.482 vs 0.529 (anti-ranked!) |
+
+**Conclusion (conclusive):** plain logit-adjusted BCE *cannot overfit even 13 fire pixels* — fire and
+no-fire probs end up nearly equal (0.668 vs 0.634). The mean BCE over ~99.99 % negative cells dilutes the
+rare-positive gradient to nothing; the logit adjustment **shifts the decision boundary but does not change
+the gradient magnitude**, so it can't fix dilution. Higher lr alone doesn't help (it's dilution, not speed);
+*tempering* the adjustment makes it worse (anti-ranks). **Focal (γ=2) is the cure**: down-weighting easy,
+confident negatives by `(1−p_t)^γ` lets the rare positives dominate — it overfits the batch (AP 0.77, ROC
+1.00, fire cells → prob 1.0). A unit test on synthetic data confirms the mechanism: focal lifts the
+positive:negative gradient ratio from **40:1 to 3447:1** (the easy-negative gradient drops ~80×).
+
+**Fix shipped:**
+- `RegimeLogitAdjustedBCE` gained a `focal_gamma` knob (default 0 = unchanged; training uses **2**): applies
+  `(1−p_t)^γ` modulation on top of the per-regime logit adjustment, keeping both orthogonal knobs (adjustment
+  = boundary/prior, focal = un-dilute gradient, α = regime budget).
+- `train.py`: `--focal-gamma` (default 2.0), lr default → **1e-4**, loss logged as `RegimeFocalLogitAdjustedBCE`.
+- Relaunched as `seg_coarse4_focal_v2` (batch 32, α 0.6, oversample 3, GroupNorm, blend early-stop, 300/patience 25),
+  wrapped in `caffeinate -i` (the prior run died when the laptop slept).
+
+**...which exposed a SECOND bug (the dilution one level up).** `focal_v2` trained 9 epochs and *diverged*:
+train loss fell steadily (0.034→0.010) but val ROC drifted **down** (0.78→0.69) and AP stayed pinned at the
+floor — the overfitting signature, not pre-climb stagnation. The tell was in the loss components: the
+**ignition term was frozen at 0.0004 from epoch 1** while spread fell 0.083→0.024. The model learned *only*
+spread and ignored ignition entirely. (Confirmed the val metric was real, not degenerate: the strided val
+subset holds 761 new-ign + 603 spread positive pixels.)
+
+**Root cause:** the regime reduction averaged each regime's focal loss over its **total cell count** (~40k for
+ignition), re-diluting the handful of positives that focal had just rescued — the *same* dilution, one level
+up. So `L_ignition ≈ (few positives × ~1)/40,000 ≈ 1e-4`, and α=0.6 just scaled a near-zero number; the spread
+term out-gradiented ignition ~150:1 every step. The overfit diagnostic still passed earlier only because 120
+repeats of one fixed batch let a tiny gradient accumulate. This is exactly what RetinaNet guards against by
+normalizing focal loss by **#positives**, not #anchors — I'd divided by #cells and reintroduced it.
+
+**Fix #2:** normalize each regime by its **focal-weight mass** (`Σ focal_weight`, detached, floored), i.e. a
+focal-*weighted* mean of BCE — positives + hard negatives dominate, easy negatives drop out, loss stays O(1)
+so lr/α are unchanged in scale. (With `focal_gamma=0` the mass reduces to the cell count → old behavior, back-
+compat.) The lr-sweep overfit diagnostic (now exercising the **real** `RegimeLogitAdjustedBCE`) confirms it:
+
+| recipe (real loss, focal-mass norm) | loss 0→120 | train AP | new-ign | ROC |
+|---|---|---|---|---|
+| lr 5e-5 | 2.46 → 0.009 | **1.000** | **1.000** | **1.000** |
+| lr 2e-5 | 2.46 → 0.038 | 1.000 | 1.000 | 1.000 |
+| lr 1e-5 | 2.46 → 0.124 | 1.000 | 1.000 | 1.000 |
+| lr 5e-6 | 2.46 → 2.026 | 0.094 | 0.094 | (too slow) |
+
+Note the *new* normalization overfits to **AP 1.000** where the buggy one capped at 0.770 — the dilution was
+hurting even the overfit test. **Relaunched as `seg_coarse4_focal_v3`: lr 5e-5, batch 16, focal-mass loss.**
+
+**Batch 32 → 16 (swap fix).** `focal_v2` ran the machine into paging (23 % free + ~106k pageouts during; 81 %
+free after stop), and the ~600 s epochs were likely part swap-stall. The biggest controllable consumer is
+U-Net activation memory on MPS, which scales with batch. Because we chose **GroupNorm** (batch-independent),
+halving the batch is statistically **free** — so batch 16 cuts the dominant unified-memory cost with no
+normalization penalty, and should stop the swap.
+
+### Bugs found & fixed
+- **Loss collapse under extreme imbalance** *(found → fixed)*. Mean-reduced regime BCE diluted the
+  rare-positive (ignition: 0.004 % pos) gradient so far that the model converged to all-negative — val AP ≈ 0,
+  ROC < 0.5. Impact: the entire first training run learned nothing. Fixed by adding focal down-weighting
+  (γ=2), proven necessary by the overfit diagnostic above (the logit adjustment alone shifts the boundary but
+  does not undo dilution).
+- **Regime-mean re-dilution (focal normalized by cell count, not positives)** *(found → fixed)*. The per-regime
+  reduction divided each regime's focal loss by its total cell count (~40k), re-diluting the positives focal had
+  rescued → ignition loss frozen at 1e-4, `focal_v2` diverged (train↓ / val ROC↓, AP floored) over 9 epochs.
+  Impact: the second training run learned spread only, never ignition. Fixed by normalizing by the detached
+  focal-weight mass (RetinaNet-style #positives normalization); lr lowered 1e-4 → 5e-5 for the new loss scale,
+  batch 32 → 16 (free under GroupNorm) to end the swapping.
+
+## 2026-06-06 — I/O optimization: training is now GPU-bound (~4× faster epochs)
+
+**Bottleneck found:** data loading, not compute — at batch 32 / `num_workers=0`, ~12.5 s/step loading
+(48 dynamic features = 48 separate compressed zarr chunk reads/sample) vs ~4 s/step MPS compute → **GPU
+only ~24 % utilized.**
+
+**Fix — a training-optimized dynamic-feature stack + thread prefetch:**
+- `scripts/build_training_array.py` → `data/gold/IberFire_coarse4_dyn.zarr`: the 48 *dynamic* features
+  pre-stacked into `(time, channel, y, x)`, **float16, pre-normalized** (train stats), **Blosc-lz4**,
+  chunked `(1, C, y, x)`. So a day = **1 contiguous read + 1 decompress** (statics stay RAM-cached,
+  calendar broadcast). Built via `_build_X`, so values are identical to the live pipeline. + a precomputed
+  `regime` array. ~14 GB.
+- `StackedRegimeIberFireDataset` (datasets.py): reads the stack for dynamic channels, assembles cached
+  statics + broadcast calendar — same `(X, y, regime)` contract.
+- **Thread prefetcher** in `train.py` (`--use-stack`): overlaps loading with compute *without* multiprocess
+  workers (GIL released during zarr I/O; avoids the worker CPU-contention measured earlier).
+
+**Result:** loading **13.7 → 1.5 s/step (9×)**; since 1.5 s < 4 s compute, the step is compute-bound →
+**GPU ~100 %**, epoch **~16 → ~4 min**, startup 5 min → ~51 s.
+
+**float16 verified safe:** model trains in fp32 (only stored *inputs* are fp16); round-trip error max 0.004 /
+mean 8e-5 on normalized features — far below the data's own noise floor. Full-X parity vs the reference loader
+confirmed (max|Δ|≈0.008, y/regime exact).
+
+### Bugs found & fixed
+- **xarray append-mode drops group attrs** *(found → fixed)*. `to_zarr(mode="a", append_dim=...)` didn't
+  persist the `dyn_features` attr written on the first block, so the loader `KeyError`'d. Fixed by reading the
+  channel names from the stored `channel` *coordinate* (survives appends) instead of a group attr.
+
 ## 2026-06-06 — Training pipeline rebuilt (single-head regime-aware U-Net)
 
 Fresh training pipeline on the 4 km cube (provisional resolution), validated end-to-end on MPS.

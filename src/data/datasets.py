@@ -561,3 +561,48 @@ class RegimeIberFireDataset(BaseIberFireDataset):
                 fire_day[tl] = bool(np.asarray(lab[tl, :, :]).sum() > 0)
             weights.append(fire_oversample if fire_day[tl] else 1.0)
         return WeightedRandomSampler(weights, num_samples=len(self.time_indices), replacement=True)
+
+
+class StackedRegimeIberFireDataset(RegimeIberFireDataset):
+    """Fast loader: dynamic features come from a pre-stacked, pre-normalised float16 array
+    (one chunk per day, built by scripts/build_training_array.py), statics stay RAM-cached.
+
+    Same output contract as RegimeIberFireDataset — (X[C,H,W], y[1,H,W], regime[1,H,W]) — and
+    identical values, but per sample it does ~1 disk read (the 48-channel dynamic stack) +
+    cached/broadcast assembly for the ~98 static/calendar channels, instead of ~48 separate
+    zarr reads. `regime` is read from the stack store (precomputed); `y` (label) from the cube.
+    """
+
+    def __init__(self, *args, dyn_zarr_path, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.dyn_root = zarr.open(str(dyn_zarr_path), mode="r")
+        # dynamic-channel order is stored as the 'channel' coordinate (robust across append writes)
+        dyn_names = [str(c) for c in xr.open_zarr(dyn_zarr_path, consolidated=True)["channel"].values]
+        idx_of = {name: i for i, name in enumerate(dyn_names)}
+        missing = [v for v in self.feature_vars if v in self.dynamic_vars and v not in idx_of]
+        if missing:
+            raise KeyError(f"dyn stack missing dynamic features: {missing}")
+        # per output channel: (is_dynamic, stack_index_if_dynamic_else_-1)
+        self._stack_plan = [(v in self.dynamic_vars, idx_of.get(v, -1)) for v in self.feature_vars]
+
+    def _build_X(self, t: int) -> np.ndarray:
+        dyn = np.asarray(self.dyn_root["dyn"][t], dtype="float32")  # (C_dyn, H, W), pre-normalised
+        X = np.empty((len(self.feature_vars), self.H, self.W), dtype="float32")
+        for i, (is_dyn, sidx) in enumerate(self._stack_plan):
+            if is_dyn:
+                X[i] = dyn[sidx]
+            else:  # static (RAM-cached) or calendar (broadcast) — normalise on the fly (cheap)
+                arr = np.asarray(self._raw_feature(self.feature_vars[i], t), dtype="float32")
+                mean = float(self._means[i]); std = float(self._stds[i])
+                if not np.isfinite(arr).all():
+                    fill = 0.0 if self.nan_policy == "zero" else mean
+                    arr = np.nan_to_num(arr, nan=fill, posinf=fill, neginf=fill)
+                X[i] = (arr - mean) / std
+        return X
+
+    def __getitem__(self, idx: int):
+        t = int(self.time_indices[idx])
+        X = self._build_X(t)
+        y = self._build_y(t + self.lead_time)
+        regime = np.asarray(self.dyn_root["regime"][t], dtype="int64")[np.newaxis, ...]
+        return torch.from_numpy(X), torch.from_numpy(y), torch.from_numpy(regime)

@@ -7,13 +7,16 @@ class prior, and combines:
 
     loss = alpha * L_ignition + (1 - alpha) * L_spread
 
-Two orthogonal knobs:
+Three orthogonal knobs:
   * the per-regime **logit adjustment** corrects each regime's positive/negative imbalance
-    (ignition positives are far rarer than spread, so they get a stronger negative shift);
+    (ignition positives are far rarer than spread, so they get a stronger negative shift) —
+    it SHIFTS the decision boundary but does NOT change the gradient magnitude;
+  * **focal_gamma** down-weights easy (confident) cells so the rare-positive gradient is not
+    diluted to nothing by the ~99.99% negatives — without it the model collapses to all-negative
+    and cannot even overfit a handful of fire days (diagnosed via scripts/diag_overfit.py: plain
+    logit-adj BCE train-AP 0.00 vs focal gamma=2 train-AP 0.77, ROC 1.00). This is the load-bearing fix;
   * **alpha** is the gradient-budget lean toward the hard ignition regime (recommend ~0.6 —
     a gentle lean; not the imbalance correction).
-
-Kept as logit-adjusted BCE (not focal) to change one thing at a time vs. the prior pipeline.
 """
 from __future__ import annotations
 
@@ -64,11 +67,14 @@ class RegimeLogitAdjustedBCE(nn.Module):
         adj_ignition, adj_spread: per-regime logit adjustments (from compute_regime_priors).
     """
 
-    def __init__(self, alpha: float, adj_ignition: float, adj_spread: float):
+    def __init__(self, alpha: float, adj_ignition: float, adj_spread: float, focal_gamma: float = 0.0):
         super().__init__()
         if not 0.0 <= alpha <= 1.0:
             raise ValueError("alpha must be in [0, 1]")
         self.alpha = float(alpha)
+        self.focal_gamma = float(focal_gamma)  # >0 down-weights easy (confident) cells — essential here:
+        # without it, the mean over ~99.99% negatives dilutes the rare-positive gradient to nothing
+        # (the logit adjustment shifts the boundary but does NOT un-dilute). Diagnosed via overfit test.
         self.register_buffer("adj_ign", torch.tensor(float(adj_ignition)))
         self.register_buffer("adj_spread", torch.tensor(float(adj_spread)))
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
@@ -81,16 +87,29 @@ class RegimeLogitAdjustedBCE(nn.Module):
         adj = torch.zeros_like(logits)
         adj = torch.where(ign, self.adj_ign.to(logits.dtype), adj)
         adj = torch.where(spr, self.adj_spread.to(logits.dtype), adj)
-        per_px = self.bce(logits + adj, targets)
+        z = logits + adj
+        bce = self.bce(z, targets)
+        if self.focal_gamma > 0:  # focal modulation (1 - p_t)^gamma
+            p = torch.sigmoid(z)
+            p_t = torch.where(targets > 0.5, p, 1.0 - p)
+            focal_w = (1.0 - p_t) ** self.focal_gamma
+        else:
+            focal_w = torch.ones_like(bce)
+        per_px = focal_w * bce
 
-        def regime_mean(mask):
+        # Normalize each regime by its FOCAL-WEIGHT MASS, not raw cell count. Dividing by the
+        # ~40k cells per regime re-diluted the handful of positives that focal had just rescued
+        # (RetinaNet normalizes focal loss by #positives for exactly this reason). Using the
+        # focal-weight mass = a focal-weighted MEAN of BCE: positives + hard negatives (weight≈1)
+        # dominate, easy negatives (weight≈0) drop out. Detached so it's a pure per-batch
+        # normalizer (gradient flows through the numerator's focal modulation, standard focal).
+        # With focal_gamma=0 the mass reduces to the cell count → exactly the old mean (back-compat).
+        def regime_norm(mask):
             m = mask.to(per_px.dtype)
-            denom = m.sum()
-            if denom <= 0:
-                return logits.new_tensor(0.0)
+            denom = (focal_w * m).sum().detach().clamp_min(1e-6)
             return (per_px * m).sum() / denom
 
-        l_ign = regime_mean(ign)
-        l_spr = regime_mean(spr)
+        l_ign = regime_norm(ign)
+        l_spr = regime_norm(spr)
         loss = self.alpha * l_ign + (1.0 - self.alpha) * l_spr
         return loss, {"L_ignition": l_ign.detach(), "L_spread": l_spr.detach()}

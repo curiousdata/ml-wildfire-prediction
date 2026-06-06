@@ -5,12 +5,14 @@ Pipeline (the deep rewrite):
   * RegimeIberFireDataset (146 features incl. is_fire(t); regime code per pixel) + fire-day
     resampling (WeightedRandomSampler); full-image batches.
   * GroupNorm U-Net (small-batch-safe on ~14 GB) via build_unet(norm="group").
-  * Regime-aware logit-adjusted BCE (per-regime priors from train; alpha leans to ignition).
+  * Regime-aware FOCAL logit-adjusted BCE (per-regime priors from train; alpha leans to ignition;
+    focal_gamma=2 by default — the load-bearing fix for rare-positive gradient dilution).
   * MLflow: PARAMS + METRICS only (no duplicate model artifact). Single .pth checkpoint.
   * MPS-aware; num_workers=0 by default (Mac/MPS DataLoader-worker overhead — benchmarked).
 
-Selection/early-stopping is on VAL **new-ignition AP** (the bar from the GBT floor ≈ 0.50),
-not the blended number. Run with --smoke for a fast end-to-end sanity pass.
+Selection/early-stopping is on a VAL **blend** = alpha*new-ignition AP + (1-alpha)*spread AP
+(same weights as the loss). The GBT new-ignition floor ≈ 0.50 is the bar to beat. Run with
+--smoke for a fast end-to-end sanity pass.
 """
 from __future__ import annotations
 
@@ -31,16 +33,40 @@ project_root = Path(__file__).resolve().parents[1]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from src.data.datasets import RegimeIberFireDataset
+from src.data.datasets import RegimeIberFireDataset, StackedRegimeIberFireDataset
 from src.data.features import build_segmentation_features
 from src.models.cnn import build_unet
 from src.models.losses import RegimeLogitAdjustedBCE, compute_regime_priors
 
 CUBE = project_root / "data" / "gold" / "IberFire_coarse4.zarr"
+DYN = project_root / "data" / "gold" / "IberFire_coarse4_dyn.zarr"
 STATS = project_root / "stats" / "coarse4_norm_stats_train.json"
 SPLITS = {"train": ("2008-01-01", "2018-12-31"),
           "val": ("2019-01-01", "2021-12-31"),
           "test": ("2022-01-01", "2024-12-31")}
+
+
+def prefetch(iterable, depth: int = 3):
+    """Background-thread prefetcher: overlaps loading with GPU compute without multiprocess
+    workers (zarr/NumPy release the GIL during I/O, so the thread loads while MPS computes)."""
+    import queue
+    import threading
+    q: "queue.Queue" = queue.Queue(maxsize=depth)
+    sentinel = object()
+
+    def worker():
+        try:
+            for item in iterable:
+                q.put(item)
+        finally:
+            q.put(sentinel)
+
+    threading.Thread(target=worker, daemon=True).start()
+    while True:
+        item = q.get()
+        if item is sentinel:
+            break
+        yield item
 
 
 def get_device() -> torch.device:
@@ -85,11 +111,12 @@ def evaluate(model, loader, device) -> dict:
     return regime_ap(np.concatenate(probs), np.concatenate(tgts), np.concatenate(regs))
 
 
-def make_dataset(t0, t1, feature_vars):
-    return RegimeIberFireDataset(
-        zarr_path=CUBE, time_start=t0, time_end=t1, feature_vars=feature_vars,
-        label_var="is_fire", lead_time=1, compute_stats=False, stats_path=STATS, mode="all",
-    )
+def make_dataset(t0, t1, feature_vars, use_stack=False):
+    common = dict(zarr_path=CUBE, time_start=t0, time_end=t1, feature_vars=feature_vars,
+                  label_var="is_fire", lead_time=1, compute_stats=False, stats_path=STATS, mode="all")
+    if use_stack:
+        return StackedRegimeIberFireDataset(dyn_zarr_path=DYN, **common)
+    return RegimeIberFireDataset(**common)
 
 
 def main() -> None:
@@ -101,15 +128,20 @@ def main() -> None:
     ap.add_argument("--model-name", default="seg_coarse4_v1")
     ap.add_argument("--epochs", type=int, default=50)
     ap.add_argument("--batch-size", type=int, default=4)
-    ap.add_argument("--lr", type=float, default=3e-5)
+    ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--weight-decay", type=float, default=2e-3)
     ap.add_argument("--alpha", type=float, default=0.6, help="ignition-regime loss weight")
+    ap.add_argument("--focal-gamma", type=float, default=2.0,
+                    help="focal down-weighting of easy cells; 0=plain BCE. >0 is the load-bearing "
+                         "fix for rare-positive gradient dilution (diag_overfit.py)")
     ap.add_argument("--encoder", default="resnet34")
     ap.add_argument("--decoder-dropout", type=float, default=0.10)
     ap.add_argument("--num-workers", type=int, default=0)
     ap.add_argument("--patience", type=int, default=10)
     ap.add_argument("--steps-per-epoch", type=int, default=0, help="0 = full epoch")
     ap.add_argument("--fire-oversample", type=float, default=10.0)
+    ap.add_argument("--use-stack", action="store_true", help="use the pre-stacked dynamic array (fast loading)")
+    ap.add_argument("--compile", action="store_true", help="try torch.compile on the model (MPS-experimental)")
     ap.add_argument("--smoke", action="store_true")
     args = ap.parse_args()
 
@@ -125,9 +157,9 @@ def main() -> None:
                   "test": ("2017-06-01", "2017-08-31")}
         args.epochs, args.steps_per_epoch, args.batch_size = 2, 15, 2
 
-    train_ds = make_dataset(*splits["train"], feature_vars)
-    val_ds = make_dataset(*splits["val"], feature_vars)
-    test_ds = make_dataset(*splits["test"], feature_vars)
+    train_ds = make_dataset(*splits["train"], feature_vars, args.use_stack)
+    val_ds = make_dataset(*splits["val"], feature_vars, args.use_stack)
+    test_ds = make_dataset(*splits["test"], feature_vars, args.use_stack)
 
     # --- per-regime priors from a strided train subset (cheap, stable) ---
     stride = max(1, len(train_ds) // (40 if args.smoke else 800))
@@ -137,9 +169,15 @@ def main() -> None:
     log.info(f"priors: ignition pos_rate={prior_info['ignition_pos_rate']:.5f} (adj={adj_ign:.2f}) | "
              f"spread pos_rate={prior_info['spread_pos_rate']:.5f} (adj={adj_spr:.2f})")
 
-    loss_fn = RegimeLogitAdjustedBCE(args.alpha, adj_ign, adj_spr).to(device)
+    loss_fn = RegimeLogitAdjustedBCE(args.alpha, adj_ign, adj_spr, focal_gamma=args.focal_gamma).to(device)
     model = build_unet(in_channels=C, encoder_name=args.encoder, encoder_weights="imagenet",
                        decoder_dropout=args.decoder_dropout, norm="group").to(device)
+    if args.compile:
+        try:
+            model = torch.compile(model)
+            log.info("torch.compile enabled")
+        except Exception as e:  # MPS support is experimental — fall back gracefully
+            log.warning(f"torch.compile failed ({e}); continuing uncompiled")
     optim = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size,
@@ -160,8 +198,9 @@ def main() -> None:
             "resolution_km": 4, "in_channels": C, "encoder": args.encoder, "norm": "group",
             "batch_size": args.batch_size, "lr": args.lr, "weight_decay": args.weight_decay,
             "alpha": args.alpha, "decoder_dropout": args.decoder_dropout,
+            "focal_gamma": args.focal_gamma,
             "fire_oversample": args.fire_oversample, "device": str(device),
-            "loss": "RegimeLogitAdjustedBCE", "adj_ignition": adj_ign, "adj_spread": adj_spr,
+            "loss": "RegimeFocalLogitAdjustedBCE", "adj_ignition": adj_ign, "adj_spread": adj_spr,
             "lead_time": 1, **{f"split_{k}": f"{v[0]}..{v[1]}" for k, v in splits.items()},
         })
 
@@ -171,7 +210,7 @@ def main() -> None:
             model.train()
             t0 = time.time()
             run_loss = run_ign = run_spr = 0.0
-            for i, (X, y, reg) in enumerate(train_loader):
+            for i, (X, y, reg) in enumerate(prefetch(train_loader)):
                 if i >= steps:
                     break
                 X, y, reg = X.to(device).float(), y.to(device).float(), reg.to(device)
