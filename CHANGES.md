@@ -128,8 +128,11 @@ New module **`src/data/feature_engineering.py`** — pure, slice-validated deriv
 - **KBDI recursion error** *(found via validation → fixed)*. `net_rain` went negative on the first dry day
   after a wet spell (cum_wet reset made `new_excess < prev_excess`), spuriously *adding* drought deficit
   (cold-check Q hit 54.9 where it should be 0). **Fix:** zero `net_rain` on dry days. Now cold-check Q=0.
-- **Precipitation units ambiguity** *(found → flagged, blocks KBDI)*. `total_precipitation_mean` is an ERA5-Land
-  hourly-mean of a *cumulative* field; `×24` implies ~8665 mm/yr for Spain (actual ~640) — ~13× too high.
-  Likely `daily_total ≈ 2×tp` (~722 mm/yr ✓). **Impact:** physical-mm features (KBDI) can't be trusted until
-  resolved; relative precip features (`precip_sum_*`, `days_since_rain`) and SPI are unaffected (unit-independent).
-  To resolve via the IberFire paper/repo + AEMET annual-rainfall calibration.
+- **Precipitation units ambiguity** *(found → RESOLVED)*. The paper confirms `total_precipitation_mean` is the
+  **mean of hourly ERA5-Land `total_precipitation`** (a *cumulative* field), m→mm — NOT a daily sum. So `×24`
+  (≈8665 mm/yr, absurd) was wrong. Empirically the land mean is 437 mm/yr at `×2` with the correct wet-NW
+  (595) / dry-SE (237) pattern; matching AEMET's ~640 needs **`daily_total ≈ 2.9×tp`** (the cumulative-mean
+  factor is timing-dependent, ~2–3, so it's an *approximate* daily-rainfall proxy). **Impact:** KBDI uses
+  `2.9×tp` and is treated as a relative predictor; the relative precip features (`precip_sum_*`,
+  `days_since_rain`) and SPI (standardized) are unaffected. *(Aside: `pyproj` is missing from the local venv —
+  used national-mean calibration, not per-city.)*

@@ -268,6 +268,58 @@ def day_of_week_sincos(day_of_week, period: float = 7.0):
 # new-ignition vs. continuation split.
 
 
+def seasonal_anomaly(values, doy, eps: float = 1e-6):
+    """Standardized anomaly vs the day-of-year climatology (per pixel).
+
+    For each calendar day-of-year d, z = (value − mean_d) / std_d, where mean_d/std_d
+    are computed across all years sharing that doy. Captures "wetter/greener/drier than
+    normal for the season." Unit-independent (standardized), so it doubles as:
+      - SPI-like  : seasonal_anomaly(precip_sum_90d, doy)
+      - greenness : seasonal_anomaly(NDVI, doy) / seasonal_anomaly(LAI, doy)
+
+    Args:
+        values: (time, y, x) array. doy: (time,) integer day-of-year (1..366).
+    Returns:
+        (time, y, x) float32 z-scores. NaNs propagate.
+    """
+    values = np.asarray(values, dtype="float64")
+    doy = np.asarray(doy)
+    out = np.empty_like(values, dtype="float32")
+    for d in np.unique(doy):
+        sel = doy == d
+        block = values[sel]
+        mean = np.nanmean(block, axis=0)
+        std = np.nanstd(block, axis=0)
+        out[sel] = ((block - mean) / (std + eps)).astype("float32")
+    return out
+
+
+def topographic_position_index(elevation, size: int = 5):
+    """TPI: elevation minus the local (size×size) mean — ridge (>0) vs valley (<0).
+
+    NaN-aware (sea cells stay NaN; the local mean ignores NaN neighbours).
+    """
+    from scipy.ndimage import uniform_filter
+
+    e = np.asarray(elevation, dtype="float64")
+    finite = np.isfinite(e)
+    e0 = np.where(finite, e, 0.0)
+    num = uniform_filter(e0, size=size, mode="nearest")
+    den = uniform_filter(finite.astype("float64"), size=size, mode="nearest")
+    local_mean = num / np.maximum(den, 1e-6)
+    return np.where(finite, e - local_mean, np.nan).astype("float32")
+
+
+def terrain_curvature(elevation):
+    """Terrain curvature (Laplacian of elevation) — convex (>0) vs concave (<0)."""
+    from scipy.ndimage import laplace
+
+    e = np.asarray(elevation, dtype="float64")
+    finite = np.isfinite(e)
+    curv = laplace(np.where(finite, e, 0.0))
+    return np.where(finite, curv, np.nan).astype("float32")
+
+
 def fire_distance_and_exposure(fire_mask, wind_u, wind_v, x_coords, y_coords, no_fire_dist_km):
     """Spatial fire-context for ONE day.
 
