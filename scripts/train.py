@@ -35,7 +35,7 @@ if str(project_root) not in sys.path:
 
 from src.data.datasets import RegimeIberFireDataset, StackedRegimeIberFireDataset
 from src.data.features import build_segmentation_features
-from src.models.cnn import build_unet
+from src.models.cnn import build_unet, build_wide_deep_unet
 from src.models.losses import RegimeLogitAdjustedBCE, compute_regime_priors
 
 CUBE = project_root / "data" / "gold" / "IberFire_coarse4.zarr"
@@ -171,6 +171,9 @@ def main() -> None:
                          "fix for rare-positive gradient dilution (diag_overfit.py)")
     ap.add_argument("--encoder", default="resnet34")
     ap.add_argument("--decoder-dropout", type=float, default=0.10)
+    ap.add_argument("--wide", action="store_true",
+                    help="wide-and-deep: add a point-wise 1x1 branch (GBT-style pathway) to the U-Net")
+    ap.add_argument("--wide-dropout", type=float, default=0.10, help="Dropout2d in the wide branch")
     ap.add_argument("--num-workers", type=int, default=0)
     ap.add_argument("--patience", type=int, default=10)
     ap.add_argument("--steps-per-epoch", type=int, default=0, help="0 = full epoch")
@@ -205,8 +208,15 @@ def main() -> None:
              f"spread pos_rate={prior_info['spread_pos_rate']:.5f} (adj={adj_spr:.2f})")
 
     loss_fn = RegimeLogitAdjustedBCE(args.alpha, adj_ign, adj_spr, focal_gamma=args.focal_gamma).to(device)
-    model = build_unet(in_channels=C, encoder_name=args.encoder, encoder_weights="imagenet",
-                       decoder_dropout=args.decoder_dropout, norm="group").to(device)
+    if args.wide:
+        model = build_wide_deep_unet(in_channels=C, encoder_name=args.encoder, encoder_weights="imagenet",
+                                     decoder_dropout=args.decoder_dropout, norm="group",
+                                     wide_dropout=args.wide_dropout).to(device)
+        log.info(f"wide-and-deep: deep U-Net + point-wise 1x1 branch (wide_dropout={args.wide_dropout}, "
+                 f"zero-init head → starts at deep baseline)")
+    else:
+        model = build_unet(in_channels=C, encoder_name=args.encoder, encoder_weights="imagenet",
+                           decoder_dropout=args.decoder_dropout, norm="group").to(device)
     if args.compile:
         try:
             model = torch.compile(model)
@@ -233,7 +243,7 @@ def main() -> None:
             "resolution_km": 4, "in_channels": C, "encoder": args.encoder, "norm": "group",
             "batch_size": args.batch_size, "lr": args.lr, "weight_decay": args.weight_decay,
             "alpha": args.alpha, "decoder_dropout": args.decoder_dropout,
-            "focal_gamma": args.focal_gamma,
+            "focal_gamma": args.focal_gamma, "wide": args.wide, "wide_dropout": args.wide_dropout,
             "fire_oversample": args.fire_oversample, "device": str(device),
             "loss": "RegimeFocalLogitAdjustedBCE", "adj_ignition": adj_ign, "adj_spread": adj_spr,
             "lead_time": 1, **{f"split_{k}": f"{v[0]}..{v[1]}" for k, v in splits.items()},

@@ -10,6 +10,41 @@ current dated entry — what was wrong, its impact, and the fix (or that it's fl
 
 ---
 
+## 2026-06-06 — v4 baseline established: spread solved, ignition plateaus below GBT (architecture-bound)
+
+Ran `seg_coarse4_focal_v4` (focal-mass loss, lr 5e-5, batch 16, α 0.6, oversample 3, GroupNorm,
+corrected eval) for 14 epochs and stopped it — it had clearly converged into a plateau. This is the
+clean, honestly-measured **baseline** for the next-day fire U-Net.
+
+**Results (val, AP @ matched 15:1 prevalence, per-regime adjustment applied — comparable to GBT):**
+- best checkpoint = **epoch 5**: val blend **0.611**, **new-ign AP 0.358**, **spread AP 0.991**, ROC 0.909, prec@K 0.11.
+- spread is **solved**: 0.96–0.99 throughout, at/above the GBT floor (~0.98).
+- new-ign **plateaus ~0.32** (range 0.27–0.36 across 14 epochs, peak 0.358 @ epoch 5), **well below the
+  GBT floor of 0.50**, while train loss kept falling (6.2 → 0.66, ignition 9.6 → 0.75). Converged
+  ceiling + mild overfitting — NOT undertraining.
+
+**Diagnosis — inductive-bias mismatch (not capacity / time / gradient budget).** The decisive clue is
+the regime asymmetry: the U-Net **matches GBT on the spatial regime (spread 0.99)** but **underperforms
+the point-wise GBT on ignition (0.32 vs 0.50)**. New ignition is a near-point-wise, spatially *sparse*
+event (a single cell lights up from its local fuel/weather/ignition-source conditions); the U-Net's two
+core priors fight that — (1) the resnet34 **encoder's internal** 32× stride (an architecture property, NOT
+the 4 km data coarsening: it downsamples the 230×297 grid to a ~8×10 bottleneck = ~128 km per deepest
+cell, before the decoder upsamples back) blurs the per-cell signal GBT keys on, and (2) convolutional
+smoothness spreads probability over neighborhoods, killing precision-at-top on a spiky target. Those same priors are *assets* for spread, hence 0.99 there. Ruled out: capacity (would
+hurt both regimes), training time (new-ign peaked @ epoch 5 then drifted; loss already low), alpha
+(ignition isn't gradient-starved — its loss descends fine).
+
+**Test set deliberately NOT touched** — reserved for a single head-to-head against the planned
+improvement, to keep the touched-once discipline.
+
+**Next: wide-and-deep v5.** Add a "wide" point-wise branch (stacked 1×1 convs = per-pixel MLP, the
+GBT-style pathway) fused **additively** with the existing U-Net logits, with the wide head **zero-
+initialized** so training starts bit-for-bit at the v4 baseline and can only add. Regularize the wide
+branch (Dropout2d) since a per-pixel MLP on 146 features can overfit the few ignition events. Expected:
+≥ GBT on ignition (the wide branch guarantees the point-wise pathway), > 0.50 where spatial context
+helps; spread retained via the unchanged deep branch. Loss / dataset / eval all unchanged — drop-in
+model swap behind the `build_unet` factory.
+
 ## 2026-06-06 — The model was fine; the EVAL was broken (twice). Two metric bugs, not model bugs
 
 `focal_v3` (focal-mass loss, lr 5e-5, batch 16) trained and looked like it was *failing*: val
