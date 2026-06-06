@@ -10,6 +10,54 @@ current dated entry — what was wrong, its impact, and the fix (or that it's fl
 
 ---
 
+## 2026-06-06 — The model was fine; the EVAL was broken (twice). Two metric bugs, not model bugs
+
+`focal_v3` (focal-mass loss, lr 5e-5, batch 16) trained and looked like it was *failing*: val
+new-ign AP ~0.0006 (vs a "GBT floor" of 0.50 — ~1000× short), spread AP drifting to **0.0000**, and
+val ROC sliding **0.846 → 0.715** over 4 epochs. I read that as overfitting + spread starvation and
+stopped to investigate. **Both readings were wrong — the model was healthy; the eval lied twice.**
+
+**Bug A — prevalence mismatch (the 1000× "gap").** AP is acutely prevalence-dependent (its random
+baseline *is* the prevalence). `train.py` scored AP against **all** land cells (true ~0.005 % new-ign
+prevalence), while the GBT measurement floor subsampled negatives to `neg_ratio=15` (~6 % prevalence).
+The two prevalences differ ~1200×, which fully accounts for the ~1000× AP "gap". In lift-over-random
+terms the U-Net (~12×) was already on par with / ahead of the GBT (~8×). The bar was never comparable.
+
+**Bug B — missing inference adjustment (the real one).** The loss trains the model to produce logits
+that are correct *after* a per-regime logit adjustment (ignition −10.90, spread −2.67). But
+`evaluate()` scored **raw** logits, with no adjustment — so cross-regime ranking was garbage. Applying
+the adjustment at inference (legitimate: regime is known from `dist_to_fire(t)`) on the *same* epoch-4
+checkpoint:
+
+| metric (matched 15:1 prevalence) | raw logits | + per-regime adj | GBT floor |
+|---|---|---|---|
+| spread AP | 0.068 | **0.991** | ~0.98 |
+| new-ign AP | 0.318 | 0.309 | 0.50 |
+| prec@K (R-precision) | 0.002 | **0.096** | — |
+| ROC | 0.715 | **0.899** | — |
+
+Spread wasn't starved — it had learned to **GBT level (0.99)**. And the ROC "decline" wasn't
+overfitting: as the model trained it leaned *more* on the adjustment, so raw-logit ranking decayed
+while true performance *improved*. We were watching a broken gauge fall while the engine was fine.
+
+**Fixes (eval only — the model/loss/training config were left unchanged):**
+- `evaluate()` now applies the per-regime adjustment before sigmoid (threads `adj_ign`/`adj_spr` from
+  the priors). **Serving must do the same** — the monolith's raw `sigmoid(model(X))` will need the
+  per-regime adjustment once a seg model ships (flagged for the serving path).
+- `regime_ap` → `regime_metrics`: reports **prevalence-matched AP** (negatives subsampled 15:1, same
+  seed each epoch → comparable across epochs AND to the GBT floor), **precision@K** (R-precision,
+  operational), and full-prevalence ROC. Early-stop blend now keys off the matched, adjusted APs.
+- Relaunched as `seg_coarse4_focal_v4` (identical training config; corrected eval + meaningful early stop).
+
+### Bugs found & fixed
+- **AP measured at a different prevalence than the GBT floor** *(found → fixed)*. Full-image negatives
+  vs the floor's 15:1 subsample → ~1000× incomparable AP; misread as the model failing. Fixed with a
+  prevalence-matched AP in `regime_metrics`.
+- **`evaluate()` scored raw logits without the per-regime adjustment** *(found → fixed)*. The model is
+  trained to be correct post-adjustment; raw scoring tanked spread AP (0.99→0.07) and ROC (0.90→0.71)
+  and faked a ROC "decline". Fixed by applying the adjustment at inference. Impact: two training runs
+  (v2 diagnosis aside, v3) were judged failures when the model was actually performing well.
+
 ## 2026-06-06 — First training run collapsed; focal loss is the fix (diagnosed, not guessed)
 
 The first real run (logit-adjusted BCE, lr 3e-5) **failed to learn** — val AP ≈ 0 in *both* regimes and
