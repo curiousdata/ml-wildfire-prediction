@@ -264,9 +264,14 @@ class BaseIberFireDataset(Dataset):
             self.stats = {v: {"mean": 0.0, "std": 1.0} for v in self.feature_vars}
 
         # Cache aligned stats arrays for faster __getitem__
-        self._means = np.array([self.stats[v]["mean"] for v in self.feature_vars], dtype="float32")
+        # Default missing-stat features to mean=0/std=1 (no-op normalization). This keeps
+        # already-scaled features like a 0/1 `is_fire` feature channel passing through, and
+        # is identical to before when every feature is present in stats.
+        self._means = np.array(
+            [self.stats.get(v, {}).get("mean", 0.0) for v in self.feature_vars], dtype="float32"
+        )
         self._stds = np.array(
-            [max(self.stats[v]["std"], 1e-6) for v in self.feature_vars],
+            [max(self.stats.get(v, {}).get("std", 1.0), 1e-6) for v in self.feature_vars],
             dtype="float32",
         )
 
@@ -411,6 +416,55 @@ class BaseIberFireDataset(Dataset):
         # One sample per time step
         return len(self.time_indices)
 
+    def _raw_feature(self, v: str, t: int) -> np.ndarray:
+        """Raw (H, W) array for feature `v` at time index `t` (pre-normalization).
+
+        Handles the four feature kinds: dynamic (time,y,x), simple static (y,x), and the
+        year-aware CLC / popdens bases (picks the calendar-year-appropriate map).
+        Subclasses can override to add new feature kinds (e.g. time-only calendar vars).
+        """
+        if v in self.dynamic_vars:
+            return self.root[v][t, :, :]
+        if v in self.static_vars:
+            return self.static_cache[v]
+        if v in getattr(self, "clc_base_vars", []):
+            year = int(self._years_all[t])
+            chosen = 2006 if year <= 2011 else 2012 if year <= 2017 else 2018
+            cache = self.clc_cache[v]
+            if chosen not in cache:
+                chosen = min(sorted(cache.keys()), key=lambda yy: abs(yy - year))
+            return cache[chosen]
+        if v in getattr(self, "popdens_base_vars", []):
+            year = int(self._years_all[t])
+            cache = self.popdens_cache[v]
+            chosen = year if year in cache else min(sorted(cache.keys()), key=lambda yy: abs(yy - year))
+            return cache[chosen]
+        raise KeyError(
+            f" Feature '{v}' not found among dynamic, static, CLC base, or popdens base variables."
+        )
+
+    def _build_X(self, t: int) -> np.ndarray:
+        """Normalized feature stack [C, H, W] at time index `t`."""
+        X_arrays = []
+        for i, v in enumerate(self.feature_vars):
+            arr = np.asarray(self._raw_feature(v, t), dtype="float32")
+            mean = float(self._means[i])
+            std = float(self._stds[i])
+            if not np.isfinite(arr).all():
+                if self.nan_policy == "error":
+                    raise ValueError(f" Non-finite values found in feature '{v}' at t={t}.")
+                fill_value = 0.0 if self.nan_policy == "zero" else mean
+                arr = np.nan_to_num(arr, nan=fill_value, posinf=fill_value, neginf=fill_value)
+            X_arrays.append((arr - mean) / std)
+        return np.stack(X_arrays, axis=0).astype("float32")
+
+    def _build_y(self, t_label: int) -> np.ndarray:
+        """Binary fire label [1, H, W] at time index `t_label`."""
+        y = np.asarray(self.root[self.label_var][t_label, :, :], dtype="float32")
+        if not np.isfinite(y).all():
+            y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
+        return (y > 0.5).astype("float32")[np.newaxis, ...]
+
     def __getitem__(self, idx: int):
         """
         Returns:
@@ -418,78 +472,7 @@ class BaseIberFireDataset(Dataset):
             y: Tensor of shape [1, H, W]  (fire mask at time t + lead_time)
         """
         t = self.time_indices[idx]
-        t_label = t + self.lead_time
-
-        # Load and normalize features
-        X_arrays = []
-        for i, v in enumerate(self.feature_vars):
-            if v in self.dynamic_vars:
-                # Dynamic variable: read slice directly from coarsened Zarr
-                arr = self.root[v][t, :, :]
-            elif v in self.static_vars:
-                # Simple static variable: reuse cached array
-                arr = self.static_cache[v]
-            elif v in getattr(self, "clc_base_vars", []):
-                # CLC base variable: choose appropriate year's map based on calendar year
-                year = int(self._years_all[t])
-                if year <= 2011:
-                    chosen_year = 2006
-                elif year <= 2017:
-                    chosen_year = 2012
-                else:
-                    chosen_year = 2018
-                year_cache = self.clc_cache[v]
-                if chosen_year not in year_cache:
-                    # Fallback: pick the nearest available year
-                    available_years = sorted(year_cache.keys())
-                    chosen_year = min(available_years, key=lambda yy: abs(yy - year))
-                arr = year_cache[chosen_year]
-            elif v in getattr(self, "popdens_base_vars", []):
-                # popdens base variable: choose yearly map closest to sample year
-                year = int(self._years_all[t])
-                year_cache = self.popdens_cache[v]
-                available_years = sorted(year_cache.keys())
-                if year in year_cache:
-                    chosen_year = year
-                else:
-                    # Pick the nearest available year (e.g. 2021/2022 -> 2020)
-                    chosen_year = min(available_years, key=lambda yy: abs(yy - year))
-                arr = year_cache[chosen_year]
-            else:
-                raise KeyError(
-                    f" Feature '{v}' not found among dynamic, static, CLC base, or popdens base variables."
-                )
-
-            mean = float(self._means[i])
-            std = float(self._stds[i])
-
-            # Ensure numeric dtype
-            arr = np.asarray(arr, dtype="float32")
-
-            # Handle NaNs / infs deterministically (critical for training stability)
-            if not np.isfinite(arr).all():
-                if self.nan_policy == "error":
-                    raise ValueError(
-                        f" Non-finite values found in feature '{v}' "
-                        f"at t={t} (idx={idx})."
-                    )
-                fill_value = 0.0 if self.nan_policy == "zero" else mean
-                arr = np.nan_to_num(arr, nan=fill_value, posinf=fill_value, neginf=fill_value)
-
-            # Normalize (std already clamped in __init__)
-            arr = (arr - mean) / std
-            X_arrays.append(arr)
-
-        X = np.stack(X_arrays, axis=0).astype("float32")  # [C, H, W]
-
-        # Load label at t + lead_time directly from coarsened Zarr
-        y = np.asarray(self.root[self.label_var][t_label, :, :], dtype="float32")
-        if not np.isfinite(y).all():
-            # For labels, safest fallback is treating non-finite as 0 (no-fire)
-            y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
-        y_bin = (y > 0.5).astype("float32")[np.newaxis, ...]  # [1, H, W]
-
-        return torch.from_numpy(X), torch.from_numpy(y_bin)
+        return torch.from_numpy(self._build_X(t)), torch.from_numpy(self._build_y(t + self.lead_time))
 
     def save_stats(self, path: str):
         """Save normalization stats to JSON file."""
@@ -507,8 +490,74 @@ class BaseIberFireDataset(Dataset):
     
 class StackedIberFireDataset(Dataset):
     def __init__(self):
-        # TODO: this is a placeholder for the new dataset with improved functionality
-        # that will inherit from BaseIberFireDataset and add new features: temporal stacking
-        # of days before fire (day sequence input), OR-conditioned target masks for several days
-        # (if there is a fire in any of the next N days) and more.
+        # TODO: placeholder for a future temporal-stacking dataset (day-sequence input,
+        # OR-conditioned multi-day targets). Not implemented; see RegimeIberFireDataset
+        # for the current segmentation dataset.
         pass
+
+
+class RegimeIberFireDataset(BaseIberFireDataset):
+    """Segmentation dataset for next-day fire with regime labels + calendar broadcast.
+
+    Extends BaseIberFireDataset — reuses its year-aware CLC/popdens resolution, static
+    caching, stats-based normalization, NaN policy, and time/lead filtering. Adds:
+
+      - **calendar (time,)-only features** (e.g. doy_sin/doy_cos/dow_sin/dow_cos) broadcast
+        to the full grid at read time (base would mis-read them as (time,y,x));
+      - a per-pixel **regime_code** ∈ {0 = sea/invalid, 1 = ignition (no fire within
+        ~`regime_dist_cells` of t), 2 = spread (fire nearby at t)} from `dist_to_fire(t)`,
+        consumed by the regime-aware loss;
+      - `make_weighted_sampler()` — oversample days whose label day has fire.
+
+    ``__getitem__`` returns ``(X[C,H,W], y[1,H,W], regime_code[1,H,W])``. Full-image
+    batching is just ``DataLoader(batch_size=N)``.
+    """
+
+    def __init__(self, *args, regime_dist_cells: float = 1.5, **kwargs):
+        super().__init__(*args, **kwargs)
+        # base classified (time,)-only vars as dynamic; reclassify them as calendar.
+        self.time_only_vars = [v for v in self.dynamic_vars if set(self.ds[v].dims) == {"time"}]
+        self.dynamic_vars = [v for v in self.dynamic_vars if v not in self.time_only_vars]
+        self.H = int(self.ds.sizes["y"])
+        self.W = int(self.ds.sizes["x"])
+        xc = self.ds["x"].values
+        self.cell_km = abs(float(xc[1] - xc[0])) / 1000.0
+        self.regime_dist_km = regime_dist_cells * self.cell_km
+        if "dist_to_fire" not in self.ds.data_vars:
+            raise KeyError("RegimeIberFireDataset requires 'dist_to_fire' in the cube.")
+        # land mask: finite t2m_mean on the first usable day (matches the analysis land mask).
+        t0 = int(self.time_indices[0])
+        self.land_mask = np.isfinite(np.asarray(self.root["t2m_mean"][t0, :, :], dtype="float32"))
+        logger.info(
+            f" RegimeIberFireDataset: {len(self.time_only_vars)} calendar vars broadcast; "
+            f"cell={self.cell_km:.0f}km, regime threshold={self.regime_dist_km:.0f}km, "
+            f"land cells={int(self.land_mask.sum())}"
+        )
+
+    def _raw_feature(self, v: str, t: int) -> np.ndarray:
+        if v in self.time_only_vars:  # calendar scalar -> broadcast across the grid
+            return np.full((self.H, self.W), float(self.root[v][t]), dtype="float32")
+        return super()._raw_feature(v, t)
+
+    def __getitem__(self, idx: int):
+        t = int(self.time_indices[idx])
+        X = self._build_X(t)
+        y = self._build_y(t + self.lead_time)
+        dist = np.asarray(self.root["dist_to_fire"][t, :, :], dtype="float32")
+        near = np.isfinite(dist) & (dist <= self.regime_dist_km)
+        regime = np.where(self.land_mask, np.where(near, 2, 1), 0).astype("int64")[np.newaxis, ...]
+        return torch.from_numpy(X), torch.from_numpy(y), torch.from_numpy(regime)
+
+    def make_weighted_sampler(self, fire_oversample: float = 10.0):
+        """WeightedRandomSampler oversampling days whose LABEL day (t+lead) contains fire."""
+        from torch.utils.data import WeightedRandomSampler
+
+        lab = self.root[self.label_var]
+        fire_day: Dict[int, bool] = {}
+        weights = []
+        for t in self.time_indices:
+            tl = int(t) + self.lead_time
+            if tl not in fire_day:
+                fire_day[tl] = bool(np.asarray(lab[tl, :, :]).sum() > 0)
+            weights.append(fire_oversample if fire_day[tl] else 1.0)
+        return WeightedRandomSampler(weights, num_samples=len(self.time_indices), replacement=True)

@@ -126,3 +126,46 @@ FEATURE_VARS: List[str] = (
 
 # Guard against accidental duplicates introduced during edits.
 assert len(FEATURE_VARS) == len(set(FEATURE_VARS)), "Duplicate feature names in FEATURE_VARS"
+
+
+# ---------------------------------------------------------------------------
+# Segmentation-model feature set (the coarse4 rebuild — NOT the shipped resnet34_v9)
+# ---------------------------------------------------------------------------
+# Built from the cube's actual variables, applying the principled exclusions agreed for
+# the rebuild (these are leakage/memorisation/redundancy calls, NOT importance pruning):
+#   - identity/position (AutonomousCommunities; coordinates already dropped from the cube),
+#   - mask redundancy (is_sea = inverse of the land mask we already apply),
+#   - year-aware CLC/popdens collapse to BASE names (BaseIberFireDataset resolves the
+#     calendar-year-appropriate map at read time) — feeding all years = stale data.
+# Everything else with potential signal stays (per the no-prune principle), incl. is_fire(t)
+# as a feature (current fire state) and the GBT-near-zero terrain/fuel-moisture features.
+
+# Excluded by name (not signal judgments).
+SEG_EXCLUDE: List[str] = ["is_sea", "AutonomousCommunities"]
+
+
+def build_segmentation_features(data_vars) -> List[str]:
+    """Return the segmentation model's feature list (base names) from a cube's data_vars.
+
+    CLC_{2006,2012,2018}_X -> base 'CLC_X'; popdens_YYYY -> 'popdens'; everything else
+    kept by exact name. Excludes SEG_EXCLUDE. Deterministic (sorted).
+    """
+    dv = set(data_vars)
+    feats: List[str] = []
+    seen_clc, seen_popdens = set(), False
+    for v in sorted(dv):
+        if v in SEG_EXCLUDE:
+            continue
+        if any(v.startswith(f"CLC_{yr}_") for yr in (2006, 2012, 2018)):
+            base = "CLC_" + v.split("_", 2)[2]  # CLC_2018_1 -> CLC_1 ; CLC_2018_scrub_proportion -> CLC_scrub_proportion
+            if base not in seen_clc:
+                seen_clc.add(base)
+                feats.append(base)
+            continue
+        if v.startswith("popdens_"):
+            if not seen_popdens:
+                seen_popdens = True
+                feats.append("popdens")
+            continue
+        feats.append(v)
+    return feats
