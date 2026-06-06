@@ -1,0 +1,113 @@
+{
+  "split_dates": {
+    "train": [
+      "2008-01-01",
+      "2018-12-31"
+    ],
+    "val": [
+      "2019-01-01",
+      "2021-12-31"
+    ],
+    "test": [
+      "2022-01-01",
+      "2024-12-31"
+    ]
+  },
+  "n_features": 10,
+  "features": [
+    "FWI",
+    "VPD_peak",
+    "kbdi",
+    "ffwi",
+    "dist_to_fire",
+    "NDVI",
+    "t2m_max",
+    "RH_min",
+    "days_since_rain",
+    "elevation_mean"
+  ],
+  "test_rows": 6262,
+  "test_pos": 367,
+  "test_continuation_frac": 0.5722070844686649,
+  "baselines": {
+    "fwi_alone": {
+      "overall": 0.05487715997559339,
+      "roc_auc": 0.46565879272370947,
+      "base_rate": 0.058607473650590866,
+      "new_ignition_ap": 0.025503727493276562,
+      "new_ignition_n": 157,
+      "continuation_ap": 0.03296175525217987,
+      "continuation_n": 210
+    },
+    "logreg": {
+      "overall": 0.08346708457337156,
+      "roc_auc": 0.6462790015091531,
+      "base_rate": 0.058607473650590866,
+      "new_ignition_ap": 0.029078874681896176,
+      "new_ignition_n": 157,
+      "continuation_ap": 0.0605592112451445,
+      "continuation_n": 210
+    },
+    "hist_gbt": {
+      "overall": 0.5587111606113937,
+      "roc_auc": 0.875173621944427,
+      "base_rate": 0.058607473650590866,
+      "new_ignition_ap": 0.15950208132309107,
+      "new_ignition_n": 157,
+      "continuation_ap": 0.6527661392011361,
+      "continuation_n": 210
+    }
+  },
+  "feature_importance": [
+    {
+      "feature": "dist_to_fire",
+      "importance": 0.5076963557710886,
+      "std": 0.003294443277811925
+    },
+    {
+      "feature": "NDVI",
+      "importance": 0.00843616882115202,
+      "std": 0.0021279283370986674
+    },
+    {
+      "feature": "VPD_peak",
+      "importance": 0.003169710707729164,
+      "std": 0.0006420182397271571
+    },
+    {
+      "feature": "kbdi",
+      "importance": 0.002744070838339422,
+      "std": 0.004257371310004713
+    },
+    {
+      "feature": "elevation_mean",
+      "importance": 0.0006994503202347735,
+      "std": 0.0009297799313550627
+    },
+    {
+      "feature": "t2m_max",
+      "importance": 0.00028050549552049997,
+      "std": 0.005861068003636473
+    },
+    {
+      "feature": "ffwi",
+      "importance": -0.00024425848180812765,
+      "std": 0.0014415430293239413
+    },
+    {
+      "feature": "RH_min",
+      "importance": -0.0004922901435115238,
+      "std": 0.002819736782616136
+    },
+    {
+      "feature": "FWI",
+      "importance": -0.001275672466693023,
+      "std": 0.00019058039090819992
+    },
+    {
+      "feature": "days_since_rain",
+      "importance": -0.008145196213141323,
+      "std": 0.004743563868396989
+    }
+  ]
+}

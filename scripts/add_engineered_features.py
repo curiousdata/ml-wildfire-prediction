@@ -32,6 +32,7 @@ from src.data.feature_engineering import (
     equilibrium_moisture_content,
     fosberg_ffwi,
     fractional_vegetation_cover,
+    heat_load_index,
     keetch_byram_drought_index,
     rolling_sum_time,
     seasonal_anomaly,
@@ -56,9 +57,16 @@ def main() -> None:
     doy = c["time"].dt.dayofyear.values
     nyears = (c["time"].values[-1] - c["time"].values[0]).astype("timedelta64[D]").astype(int) / 365.25
 
+    existing = set(c.data_vars)
+
     def append(name, dims, data, attrs=None):
-        if name in c.data_vars and not args.overwrite:
+        if name in existing and not args.overwrite:
             print(f"  skip {name} (exists; use --overwrite)"); return
+        if name in existing:  # mode='a' won't replace an existing var -> delete it first
+            import zarr
+            g = zarr.open_group(str(path), mode="a")
+            if name in g:
+                del g[name]
         sub_coords = {d: coords[d] for d in dims}
         ds = xr.Dataset({name: (dims, data)}, coords=sub_coords)
         if attrs:
@@ -121,23 +129,32 @@ def main() -> None:
     append("dist_to_urban", ("y", "x"), dist_urban,
            {"units": "km", "description": "WUI proxy: distance to nearest CLC_2018 artificial(>0.5) cell."})
 
-    # --- aspect orientation (continuous southness/eastness from the one-hot sectors) ---
-    # Assumes aspect_1..8 = N,NE,E,SE,S,SW,W,NW (bearings 0..315 by 45). southness=+1 for S, -1 for N.
-    bearings = np.deg2rad(np.arange(8) * 45.0)
+    # --- aspect orientation + heat-load. aspect_1..8 = 0-45,45-90,...,315-360 deg
+    #     => sector CENTERS at 22.5 + k*45 (0deg = North, clockwise). ---
+    centers = np.deg2rad(np.arange(8) * 45.0 + 22.5)
     asp = np.stack([c[f"aspect_{i}"].values for i in range(1, 9)], axis=0)  # (8,y,x) fractions
-    south = np.nansum(asp * (-np.cos(bearings))[:, None, None], axis=0).astype("float32")
-    east = np.nansum(asp * (np.sin(bearings))[:, None, None], axis=0).astype("float32")
+    east = np.nansum(asp * np.sin(centers)[:, None, None], axis=0)
+    north = np.nansum(asp * np.cos(centers)[:, None, None], axis=0)
     finite_asp = np.isfinite(c["aspect_1"].values)
-    append("aspect_southness", ("y", "x"), np.where(finite_asp, south, np.nan).astype("float32"),
-           {"description": "Continuous southness from aspect one-hots (+1=S, -1=N). ASSUMES aspect_1=N..aspect_8=NW."})
+    append("aspect_southness", ("y", "x"), np.where(finite_asp, -north, np.nan).astype("float32"),
+           {"description": "Continuous southness from aspect one-hots (+1=S, -1=N); sector centers 22.5+k*45."})
     append("aspect_eastness", ("y", "x"), np.where(finite_asp, east, np.nan).astype("float32"),
            {"description": "Continuous eastness from aspect one-hots (+1=E, -1=W)."})
+    # HLI: reconstruct a continuous aspect angle, add latitude (pyproj) + slope.
+    from pyproj import Transformer
+    aspect_deg = np.mod(np.degrees(np.arctan2(east, north)), 360.0)
+    xx, yy = np.meshgrid(c["x"].values, c["y"].values)
+    _, lat = Transformer.from_crs("EPSG:3035", "EPSG:4326", always_xy=True).transform(xx, yy)
+    hli = heat_load_index(c["slope_mean"].values, aspect_deg, lat)
+    append("hli", ("y", "x"), np.where(finite_asp, hli, np.nan).astype("float32"),
+           {"description": "McCune-Keon Heat Load Index (slope + reconstructed aspect + latitude); terrain solar load."})
 
     # --- fire history (reuse dryness/rolling helpers on is_fire) ---
     fire = c["is_fire"].values.astype("float32")
     append("time_since_last_fire", ("time", "y", "x"),
            days_since_rain(fire, threshold=0.5).astype("float32"),
-           {"units": "days", "description": "Consecutive days since the cell last burned (0 on fire days)."})
+           # NB: no units="days" attr — it makes xarray decode this as timedelta64, not float32.
+           {"description": "Consecutive days (count) since the cell last burned (0 on fire days)."})
     append("burn_frequency_365d", ("time", "y", "x"),
            rolling_sum_time(fire, 365).astype("float32"),
            {"description": "Number of fire-days in the trailing 365 days (NaN for first 364)."})

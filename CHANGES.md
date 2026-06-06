@@ -10,6 +10,66 @@ current dated entry — what was wrong, its impact, and the fix (or that it's fl
 
 ---
 
+## 2026-06-06 — Group A features materialized + measurement floor
+
+### Group A SOTA gap-fill — all materialized onto the 4 km cube (now 285 vars)
+Functions in `src/data/feature_engineering.py`; materialized via `scripts/add_engineered_features.py`
+(incremental appends). All slice-validated before materialization.
+- **Fire-weather / fuel / veg:** `emc_peak` (1-hr dead-fuel moisture, Simard), `ffwi` (Fosberg FWI), `fvc` (fractional vegetation cover).
+- **Drought:** `kbdi` (Keetch-Byram; `daily_rain≈2.9×tp`, calibrated to AEMET ~640 mm/yr — treated as a *relative* predictor), `spi_90d` (standardized 90-day precip anomaly).
+- **Greenness:** `ndvi_anomaly`, `lai_anomaly` (z-score vs day-of-year climatology).
+- **Terrain:** `tpi`, `terrain_curvature`, `aspect_southness`/`aspect_eastness` (continuous orientation from the aspect one-hots — an HLI substitute that needs no latitude).
+- **Fire history:** `time_since_last_fire`, `burn_frequency_365d` (reuse the dryness/rolling helpers on `is_fire`).
+- **Human:** `dist_to_urban` (WUI proxy: distance to CLC_2018 artificial>0.5).
+- **`hli`** (McCune-Keon Heat Load Index) — added after `pyproj` was installed (terrain solar load; slope + reconstructed aspect + latitude). Kept per the no-GBT-pruning principle (varies by region).
+- **Still deferred:** TWI (needs a flow-accumulation lib — now *justified* by the region-varying principle, worth investing in later).
+
+### Measurement floor (master unblocker) — `scripts/measurement_floor.py`
+3-way temporal split (train 2008–18 / val 2019–21 / **touched-once test** 2022–24), features at t → `is_fire` at t+1.
+Baselines: FWI-alone, logistic regression, HistGradientBoosting. PR-AUC + ROC reported **overall and split
+new-ignition vs continuation** (continuation = fire within ~1 cell at t). Permutation importance → pruning
+shortlist. Report: `reports/measurement_floor.json`.
+
+**Results (test, base rate 6.25%):** FWI-alone PR-AUC **0.063** (ROC 0.475 — *worse than random* at pixel-level
+next-day); LogReg **0.626**; HistGBT **0.789**. **Headline — new-ignition vs continuation:** continuation AP
+**0.98** (trivial persistence) vs new-ignition AP **0.32**. The blended 0.79 massively overstates real value;
+**the honest bar the U-Net must beat is new-ignition AP ≈ 0.32.** FWI-alone confirms "data-driven ≫ FWI."
+
+**Feature ranking (143 features):** `dist_to_fire` dominates (0.42, persistence); then human activity
+(`popdens_2020`, `dist_to_roads_stdev`), land cover (CLC scrub / class 27 / 24), **our fire-history**
+(`time_since_last_fire` #5, `burn_frequency_365d` #19), calendar (`doy_sin` #8), drought memory
+(`precip_sum_90d` #11, `kbdi` #15, `ndvi_anomaly` #18). **100/143 features near-useless** (top-15 = 92% of
+importance). The instantaneous fire-weather/fuel indices (VPD_peak #130, **EMC #143 last**, FFWI #76, FVC,
+SPI #136) ranked ~0/negative — **redundant** given raw weather + FWI (permutation importance masks correlated
+features). Terrain orientation (`aspect_southness` #83, `tpi` #117, `curvature` #106) ~0.
+
+**Caveats:** pixel-level tabular model (NOT the spatial U-Net — terrain/neighbourhood may matter more spatially);
+permutation importance under-ranks *correlated* groups (so "redundant" ≠ "no signal"); a new-ignition-specific
+importance pass (excluding `dist_to_fire`) is the high-value follow-up.
+
+**Methodological correction — DON'T prune features on GBT importance.** The point-wise GBT is blind to spatial
+structure *except* the relations we hand-engineered (and `dist_to_fire`, a spatial feature, ranked #1). For the
+*segmentation* model — the project's core strength — a feature that looks dead to the GBT can still feed the U-Net
+spatial context. **Operating principle: at the feature stage, keep any metric that varies by time or region; let
+in-model (U-Net) ablation at the target resolution prune later (§C).** The floor is the *bar to beat*
+(new-ignition AP 0.32) + a sanity check, NOT a kill list.
+
+**HLI / solar-load decision — REVERSED to ADD.** Initially skipped on GBT importance (aspect ranked ~0); but per
+the principle above that's the wrong basis. HLI varies by region (terrain + latitude) and `pyproj` is installed →
+built `heat_load_index` (McCune-Keon) and materialized as `hli`.
+
+### Bugs found & fixed
+- **`time_since_last_fire` timedelta decoding** *(found via FutureWarning → fixed)*. A `units:"days"` attr made
+  xarray decode the variable as `timedelta64` instead of float32 — downstream numeric code would have read
+  nanosecond counts. **Fix:** dropped the `units` attr (kept a plain description); now loads as float32.
+- **`aspect_southness`/`aspect_eastness` wrong bearings** *(found → fixed)*. Assumed aspect class 1 = North
+  centered at 0°, but `aspect_1` = "0–45°" (center 22.5°), so the orientation features were rotated 22.5°.
+  Harmless to the floor (aspect ranked ~0) but incorrect. **Fix:** sector centers 22.5 + k·45; recomputed (and
+  the same correct reconstruction feeds `hli`).
+- **Overnight session halted on denied writes** *(not a code bug)* — after a likely software-update/permission
+  reset, unattended `Write`s were rejected, so the measurement floor wasn't built until the morning. Data
+  materialization had already completed cleanly.
+
 ## 2026-06-05 — Recovery, cleanup, and the pivot to a data-first rebuild
 
 A consolidation day: took a working-but-messy research repo, paid down its debt, and re-pointed it

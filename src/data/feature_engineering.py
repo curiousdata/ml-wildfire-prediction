@@ -320,6 +320,27 @@ def terrain_curvature(elevation):
     return np.where(finite, curv, np.nan).astype("float32")
 
 
+def heat_load_index(slope_deg, aspect_deg, lat_deg):
+    """McCune & Keon (2002) Heat Load Index (eq. 3) — terrain solar load.
+
+    Captures how much solar energy a slope receives (south/SW-facing + steep +
+    lower-latitude => hotter, drier fuels). Folds aspect about 225° (SW = warmest).
+    All inputs in degrees; returns heat load (~0.03–1.1, dimensionless).
+
+    Note: in this cube aspect is only 8-sector one-hots, so `aspect_deg` is a
+    reconstructed continuous angle — HLI here is approximate. It varies by region
+    (terrain + latitude), so it's kept as a candidate for the spatial model to use.
+    """
+    s = np.deg2rad(np.asarray(slope_deg, dtype="float64"))
+    lat = np.deg2rad(np.asarray(lat_deg, dtype="float64"))
+    folded = np.deg2rad(np.abs(180.0 - np.abs(np.asarray(aspect_deg, dtype="float64") - 225.0)))
+    ln_hl = (-1.467 + 1.582 * np.cos(lat) * np.cos(s)
+             - 1.500 * np.cos(folded) * np.sin(s) * np.sin(lat)
+             - 0.262 * np.sin(lat) * np.sin(s)
+             + 0.607 * np.sin(folded) * np.sin(s))
+    return np.exp(ln_hl)
+
+
 def fire_distance_and_exposure(fire_mask, wind_u, wind_v, x_coords, y_coords, no_fire_dist_km):
     """Spatial fire-context for ONE day.
 
