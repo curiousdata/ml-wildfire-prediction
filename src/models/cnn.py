@@ -11,6 +11,30 @@ import segmentation_models_pytorch as smp
 import torch.nn as nn
 
 
+def _groupnorm_num_groups(num_channels: int, max_groups: int = 32) -> int:
+    """Largest group count from {32,16,8,4,2,1} that divides num_channels."""
+    for g in (max_groups, 16, 8, 4, 2, 1):
+        if num_channels % g == 0:
+            return g
+    return 1
+
+
+def convert_bn_to_groupnorm(module: nn.Module, max_groups: int = 32) -> nn.Module:
+    """Recursively replace every BatchNorm2d with GroupNorm (batch-size-independent).
+
+    Needed when batches are small (here, a few full 4 km images on ~14 GB) — small-batch
+    BatchNorm running stats are noisy/unstable; GroupNorm sidesteps it. Pretrained conv
+    weights are kept; the (fresh) GroupNorm affine params are learned.
+    """
+    for name, child in module.named_children():
+        if isinstance(child, nn.BatchNorm2d):
+            ng = _groupnorm_num_groups(child.num_features, max_groups)
+            setattr(module, name, nn.GroupNorm(ng, child.num_features, affine=True))
+        else:
+            convert_bn_to_groupnorm(child, max_groups)
+    return module
+
+
 def build_unet(
     in_channels: int,
     encoder_name: str = "resnet34",
@@ -18,6 +42,7 @@ def build_unet(
     encoder_weights: Optional[str] = "imagenet",
     decoder_dropout: float = 0.0,
     activation: Optional[str] = None,
+    norm: str = "batch",
 ) -> nn.Module:
     """Construct the segmentation U-Net used across training and inference.
 
@@ -39,7 +64,7 @@ def build_unet(
         ``encoder_weights`` and ``decoder_dropout``, so checkpoints remain
         interchangeable across those settings.
     """
-    return smp.Unet(
+    model = smp.Unet(
         encoder_name=encoder_name,
         encoder_weights=encoder_weights,
         in_channels=in_channels,
@@ -47,3 +72,8 @@ def build_unet(
         activation=activation,
         decoder_dropout=decoder_dropout,
     )
+    if norm == "group":
+        convert_bn_to_groupnorm(model)
+    elif norm != "batch":
+        raise ValueError(f"norm must be 'batch' or 'group', got {norm!r}")
+    return model

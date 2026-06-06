@@ -10,6 +10,33 @@ current dated entry — what was wrong, its impact, and the fix (or that it's fl
 
 ---
 
+## 2026-06-06 — Training pipeline rebuilt (single-head regime-aware U-Net)
+
+Fresh training pipeline on the 4 km cube (provisional resolution), validated end-to-end on MPS.
+
+- **Stats** (`scripts/compute_norm_stats.py`): per-feature mean/std over land cells, TRAIN split only
+  (no leakage). 284 vars (`is_fire`/`AutonomousCommunities` excluded). → `stats/coarse4_norm_stats_train.json`.
+- **Dataset** (`RegimeIberFireDataset`): inherits `BaseIberFireDataset` via a behavior-preserving refactor
+  (`_raw_feature`/`_build_X`/`_build_y` extracted; base output unchanged). Adds calendar `(time,)` broadcast,
+  a per-pixel **regime_code** (0=sea, 1=ignition, 2=spread, from `dist_to_fire(t)`), and a fire-day
+  `WeightedRandomSampler`. **C = 146** (`build_segmentation_features`: year-resolved CLC/popdens, `is_fire(t)`
+  added as a feature, `is_sea`/`AutonomousCommunities` excluded — leakage/redundancy calls, not pruning).
+- **Loss** (`RegimeLogitAdjustedBCE`): `α·L_ignition + (1−α)·L_spread`, **per-regime** logit adjustment.
+  Real-data priors confirm the rationale — ignition adj **−10.2** (0.004% pos) vs spread **−1.8** (14% pos);
+  one global adjustment would badly over-boost spread. α = **0.6** (gentle lean to the hard regime).
+- **Model** (`build_unet(norm="group")`): BatchNorm→GroupNorm for small-batch safety on ~14 GB; BN stays the
+  default so the shipped `resnet34_v9` still loads.
+- **train.py** (deep rewrite): 3-way temporal split (touched-once test), GroupNorm U-Net, regime loss with
+  priors from train, MLflow **params + metrics only** (no duplicate model artifact), single `.pth`, early-stop
+  on **val new-ignition AP** (bar ≈ 0.50), MPS device.
+
+### num_workers finding (Mac/MPS) — measure the real loop, not the micro-benchmark
+Isolated DataLoader benchmark said workers help (nw=4 → 9× loading throughput, with `persistent_workers`).
+But in the **actual training loop** nw=0 is **3× faster** than nw=4 (13 s vs 40 s/epoch): the MPS main process
+is CPU-bound dispatching kernels + backward, and worker processes contend for the few M-series cores and pay
+IPC to ship 40 MB full-image tensors. **Default `num_workers=0`**, confirmed by training-context measurement
+(the loading micro-benchmark was a red herring; this also matches prior hands-on experience).
+
 ## 2026-06-06 — Ignition vs. continuation: the two-regime analysis
 
 `scripts/measurement_floor.py --new-ignition` / `--continuation` split the label by whether a fire is within
