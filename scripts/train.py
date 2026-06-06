@@ -184,23 +184,27 @@ def main() -> None:
             n = min(steps, len(train_loader))
             val = evaluate(model, val_eval, device)
             dt = time.time() - t0
+            ni = val["new_ignition_ap"]; sp = val["spread_ap"]
+            # blended selection metric — same weights as the loss (alpha to ignition)
+            val_blend = (args.alpha * (ni if np.isfinite(ni) else 0.0)
+                         + (1.0 - args.alpha) * (sp if np.isfinite(sp) else 0.0))
             log.info(f"epoch {epoch}/{args.epochs} [{dt:.0f}s] loss={run_loss/n:.4f} "
-                     f"(ign={run_ign/n:.4f} spr={run_spr/n:.4f}) | val new-ign AP={val['new_ignition_ap']:.4f} "
-                     f"spread AP={val['spread_ap']:.4f} overall={val['overall_ap']:.4f} roc={val['roc']:.3f}")
+                     f"(ign={run_ign/n:.4f} spr={run_spr/n:.4f}) | val blend={val_blend:.4f} "
+                     f"(new-ign AP={ni:.4f} spread AP={sp:.4f}) overall={val['overall_ap']:.4f} roc={val['roc']:.3f}")
             mlflow.log_metrics({
                 "train_loss": run_loss / n, "train_L_ignition": run_ign / n, "train_L_spread": run_spr / n,
-                "val_new_ignition_ap": val["new_ignition_ap"], "val_spread_ap": val["spread_ap"],
+                "val_blend": val_blend, "val_new_ignition_ap": ni, "val_spread_ap": sp,
                 "val_overall_ap": val["overall_ap"], "val_roc": val["roc"], "epoch_seconds": dt,
             }, step=epoch)
 
-            if np.isfinite(val["new_ignition_ap"]) and val["new_ignition_ap"] > best_ap + 1e-5:
-                best_ap = val["new_ignition_ap"]; no_improve = 0
+            if val_blend > best_ap + 1e-5:
+                best_ap = val_blend; no_improve = 0
                 best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
                 torch.save(best_state, ckpt)  # single checkpoint; no mlflow.pytorch.log_model
             else:
                 no_improve += 1
                 if no_improve >= args.patience:
-                    log.info(f"early stop @ epoch {epoch} (best val new-ign AP={best_ap:.4f})")
+                    log.info(f"early stop @ epoch {epoch} (best val blend={best_ap:.4f})")
                     break
 
         if best_state is not None:
@@ -210,7 +214,7 @@ def main() -> None:
         log.info(f"TEST new-ign AP={test['new_ignition_ap']:.4f} spread AP={test['spread_ap']:.4f} "
                  f"overall={test['overall_ap']:.4f} roc={test['roc']:.3f}  (GBT floor: new-ign 0.50)")
         mlflow.log_metrics({f"test_{k}": v for k, v in test.items()})
-        mlflow.log_param("best_val_new_ignition_ap", best_ap)
+        mlflow.log_param("best_val_blend", best_ap)
         log.info(f"saved checkpoint: {ckpt}")
 
 
