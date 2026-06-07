@@ -10,6 +10,124 @@ current dated entry — what was wrong, its impact, and the fix (or that it's fl
 
 ---
 
+## 2026-06-07 — LIVE MVP: end-to-end same-day prediction on real feeds (Open-Meteo + FIRMS)
+
+`daily_job.py --mode live --date D` now produces a genuine live next-day prediction from REAL data:
+- **weather** ← Open-Meteo (keyless, gridded→regrid; `fetch_openmeteo.py`),
+- **today's fire** ← FIRMS NRT (key works — fetched 67 real detections for Spain 2026-06-04;
+  `fetch_firms.py` → rasterise → `dist_to_fire` → ignition/spread regime),
+- **everything else** warm-started from the cube slice with the nearest **day-of-year** (seasonal match),
+- → GBT (+isotonic calibrator) → per-region alerts + grid + feature-stats into `data/serving_store/`.
+Validated assembly (live-slice vs cube prediction for a cube date: MAE 0.00002, corr 0.999). `live_slice.py`
+builds the slice; `.env` keys loaded via dotenv.
+
+**Honest status — plumbing proven, values not yet trustworthy.** Only temperature + fire are live-refreshed;
+antecedent dryness (`precip_sum_*`, `kbdi`), RH/pressure/wind aggregates, vegetation, and
+time_since_last_fire are warm-started (now seasonally matched, but still last-year values). For trustworthy
+live risk these must come live too — the full path is: Open-Meteo HOURLY → IberFire's exact aggregation for
+RH/pressure/wind/u-v; a rolling precip/fire history (the accumulating daily-job store provides it over time)
+for antecedents; CLMS NRT (10-day) for vegetation. That's "IberFire-v2 live" — the remaining build.
+
+Rate-limit notes: Open-Meteo free tier limits/min → small URL-safe batches + Retry-After backoff; live grid
+at 0.5° (~5 requests). FIRMS NRT covers recent dates only (use forecast/recent for live; archive for backfill).
+
+## 2026-06-07 — Weather feed: pivot AEMET → Open-Meteo (keyless, gridded, ERA5-based — validated)
+
+AEMET's OpenData key signup is unreliable (key emailed, page hangs) — so switched the weather feed to
+**Open-Meteo** (`scripts/fetch_openmeteo.py`), which is strictly better here:
+- **keyless + free**, no signup; **already gridded** (query a lat/lon grid → bilinear regrid to the cube;
+  no scattered-station IDW); **ERA5-based** → matches the model's training distribution (less shift than
+  AEMET stations); **forecast API** (live "today") + **archive API** (ERA5, for backfill / IberFire-v2).
+- **Validated end-to-end against ground truth:** fetched 522 grid points for 2024-07-15, regridded
+  t2m_mean → vs the cube's own t2m_mean: **MAE 0.83 °C, corr 0.95** (≈ the AEMET gridding budget, but
+  keyless + no station interpolation + ERA5-native). This IS a cube-compatible live weather slice.
+- Notes: small batches (URL-length limit) + backoff (free-tier rate limit); 0.25° grid tightens the MAE
+  vs the 0.5° demo; pressure/RH need hourly→daily aggregation when wiring the full slice.
+- `fetch_aemet.py` retained as the station-based alternative (+ the upstream shift validation), not the path.
+
+**⇒ The live weather feed is unblocked NOW (no key). With FIRMS (fire) keyed, the live MVP is essentially
+unblocked — remaining: wire Open-Meteo + FIRMS into `daily_job.py --mode live` (the feature-slice builder).**
+
+## 2026-06-07 — Live-data track: replay dashboard + AEMET/FIRMS feed prototypes + the ERA5↔AEMET shift budget
+
+Scoped the real-time path (ROADMAP §F) after reading the IberFire authors' own pipeline
+([github.com/JulenErcibengoaTekniker/IberFire](https://github.com/JulenErcibengoaTekniker/IberFire)).
+
+- **Replay dashboard** (`docker/monolith/app_live.py`): one map, three layers for a chosen "today" — today's
+  fires `is_fire(t)`, tomorrow's IGNITION risk (warm, regime 1), tomorrow's SPREAD risk (cool, regime 2),
+  all calibrated — plus a per-Autonomous-Community ALERT panel (real INE names) and a replay date-clock
+  (honestly labelled; no faked liveness). Toggles stripped (reproject + scale always on).
+- **AEMET feed prototype** (`scripts/fetch_aemet.py`): OpenData API client + `normalize_aemet` (mirrors
+  upstream `process_aemet_station_data`: PRECIPITACION Ip→0/÷24, DIR×10, etc.) + **IDW station→grid** (the
+  piece upstream never did — they only validated point-wise). `--demo` on cube data: gridding 250 synthetic
+  stations → 40,964 cells, t2m **MAE ≈ 0.9 °C** (corr 0.94) — the station-sparsity error budget.
+- **FIRMS feed prototype** (`scripts/fetch_firms.py`): active-fire CSV API + rasterise-to-grid +
+  `dist_to_fire` (EDT). `--demo` round-trips the chain exactly (corr 1.000).
+- **Distribution-shift budget (key §F finding)** — aggregated the authors' 758-station ERA5-vs-AEMET MAEs:
+  **temperature swaps cleanly** (TMEDIA/TMAX norm-MAE ~0.04, ~1–2 °C), wind speed MED; **precipitation is
+  the risk** (norm-MAE 0.23, ~0.7 mm/h, *and* hardest to grid) — and precip drives the antecedent-dryness
+  features (`precip_sum_90d/7d`, `kbdi`) that are TOP new-ignition predictors. Pressure's high MAE (~9 hPa)
+  is likely a fixable altitude-reference offset. **⇒ the live feed will be solid on temperature, degraded on
+  precip-driven dryness — that's exactly what the §F backtest (AEMET-fed vs ERA5-fed) must measure.**
+
+- **Shift-sensitivity test** (`scripts/shift_sensitivity.py`) — perturbed TEST meteo features by the measured
+  AEMET shift, re-scored the GBT: temperature **+0.002**, wind **+0.002**, precip **−0.003** (antecedent
+  *sums* average out the noisy daily precip!), pressure **−0.023**, ALL-combined **−0.021** (0.633→0.612,
+  pressure-dominated — and pressure is modelled as random noise when it's really a correctable altitude
+  offset, so overstated). **⇒ VERDICT: the live AEMET feed is VIABLE** — even with the full measured shift the
+  model holds new-ign ~0.61 (vs the U-Net's 0.22), and the only real contributor (pressure) is fixable.
+
+**Status:** both dynamic feeds are coded + validated on cube data; going live needs free API keys
+(AEMET_API_KEY, FIRMS_MAP_KEY) + the AEMET-vs-ERA5 backtest → recalibrate (our isotonic calibrator likely
+needs re-fitting on the live distribution) → drift monitoring. CLMS vegetation (10-day cadence) not yet built.
+
+## 2026-06-07 — PIVOT: point-wise GBT beats the U-Net decisively; spatial learning doesn't help. Segmentation shelved.
+
+The biggest finding of the project, and a reversal. After v6 (regularized wide-deep) failed to close the
+v5 val→test gap (test new-ign 0.19 ≈ v5's 0.22 — so the gap was NOT overfitting), we benchmarked a
+point-wise **HistGBT on the IDENTICAL eval** (same 146 features, same cells, same `regime_metrics`;
+`scripts/gbt_compare.py`). Result, held-out TEST (2022-24, matched 15:1 prevalence):
+
+| TEST new-ign AP | spread | prec@K | ROC |
+|---|---|---|---|
+| **GBT (point-wise): 0.633** | 0.997 | 0.453 | 0.974 |
+| U-Net v5 (wide-deep): 0.216 | 0.985 | 0.267 | 0.868 |
+| U-Net v6 (+reg): 0.191 | 0.983 | 0.337 | 0.854 |
+
+**The point-wise GBT crushes the spatial U-Net (~3× on the valuable new-ignition regime), matches/beats it
+on spread, and generalizes cleanly (val 0.65 → test 0.63, NO val→test gap).** The gap we'd been fighting
+was a U-Net pathology, not a data limit; there is no ceiling problem — new ignitions ARE highly predictable.
+
+**Then we dug before pivoting (`scripts/dig.py`, `scripts/dig_spatial.py`):**
+- **GBT trustworthy (no leakage):** new-ignition drivers are distributed, legitimate physics — popdens &
+  dist_to_roads (human access), time_since_last_fire & dist_to_fire (fire history), precip_90d/7d
+  (dryness), CLC scrub/forest (fuel), doy/t2m/slope (season/weather/terrain).
+- **WHY the U-Net fails — its spatial branch is net-NEGATIVE.** v5 branch ablation on TEST: deep-only
+  new-ign 0.166 | wide-only 0.222 | full 0.216. The deep spatial branch is the *worst* part and drags the
+  full model *below* the point-wise wide branch alone — its smoothed logits corrupt the spiky point-wise
+  signal. (And the shallow wide MLP, 0.222, ≪ GBT's 0.63: trees > shallow NN on tabular point-wise data.)
+- **Does spatial EVER help? No.** Gave the strong learner maximal hand-crafted spatial context (3×3 + 5×5
+  neighbourhood means of all 146 features → 438): TEST new-ign 0.638 vs 0.633 = **+0.005 (noise)**. Two
+  independent lines — learned (U-Net, net-negative) and hand-crafted (aggregates, negligible) — agree.
+
+**Precise conclusion (NOT "spatial doesn't matter"):** spatial AND temporal structure are *essential* — and
+the thorough **feature engineering already captures them as per-cell scalars**, which is precisely why the
+GBT is so strong. Its top new-ignition drivers ARE engineered spatial features (`dist_to_fire`,
+`dist_to_roads_stdev`, `elevation_stdev`) and temporal ones (`time_since_last_fire`, `precip_sum_90d/7d`,
+`doy_sin`). So the finding is: **once spatial/temporal complexity is well-engineered into the features,
+adding *learned* spatial processing (CNN) or neighbourhood pooling on top is REDUNDANT** — the +0.005 from
+GBT+neighbourhood-means is re-deriving signal that's already there. Worse than redundant for the CNN: its
+lossy downsampling + conv-smoothness actively *corrupt* the spiky point-wise target (deep branch
+net-negative). **The feature engineering is the load-bearing contribution; the model should learn
+point-wise over those rich features. Do NOT drop the engineered spatial/temporal features — they ARE the
+signal.**
+
+**DECISION (user, 2026-06-07): adopt the point-wise GBT as the model; shelve the segmentation U-Net.**
+Forward: persist a production GBT, calibration, feature parsimony (cluster + day-level stability importance),
+and wire GBT into the map app (faster + more accurate than the CPU U-Net). The U-Net work (v4-v6,
+wide-deep, focal/regime loss, the whole `build_unet` path) stays in the repo + CHANGES as the documented
+road that led here — the apples-to-apples comparison is exactly what made the pivot defensible.
+
 ## 2026-06-06 — v5 wide-and-deep CONFIRMS the diagnosis: point-wise branch lifts ignition (interim)
 
 Built the wide-and-deep variant (`WideDeepUNet` in `src/models/cnn.py` + `--wide` in train.py): the v4
@@ -38,6 +156,15 @@ cells we'd flag, how many burn") is the more meaningful metric — and it triple
 
 **Next:** let v5 finish; run per-regime feature importance (cluster + day-level n/2 stability) on the wide
 branch (its point-wise attributions are GBT-comparable) to learn ignition drivers; decide v6 from there.
+
+**FINAL (early-stopped epoch 35, best ckpt epoch 10).** Val new-ign peaked ~0.40 (ep11), then late epochs
+**overfit hard** (val spread collapsed 0.98→0.65 by ep30+). **TEST (touched once, best ckpt): new-ign
+0.216, spread 0.985, prec@K 0.267, ROC 0.868.** The sobering part: **val new-ign 0.40 → test 0.22** — a
+large generalization gap. Spread transfers perfectly (0.98 val=test); **ignition does not**. So on the
+held-out test the wide-deep does NOT beat the GBT new-ign floor (0.22 < 0.50) — the val gains were partly
+overfitting + harder test years (2022–24, incl. Spain's extreme 2022 season). **The bottleneck is now
+GENERALIZATION, not architecture.** → v6 attacks it with strong regularization (wide_dropout 0.30,
+decoder_dropout 0.20, weight_decay 1e-2, patience 8).
 
 ### Bugs found & fixed
 - **Wide branch re-triggered hard swap at batch 16** *(found → fixed)*. The 1×1 branch is tiny in params
@@ -80,6 +207,15 @@ after the wide-deep experiment, do a controlled migration test — install repo 
 *real* `build_wide_deep_unet` through the timeout-guarded bench with training stopped; if it compiles cleanly
 and reduce-overhead beats eager, migrate to 2.12 for ~20% faster training. Not mid-experiment (keeps the
 v4-vs-v5 comparison on one stack; reproducibility).
+
+**RESOLVED (2026-06-07, real-model test on 2.12).** Installed full repo deps into the 2.12 venv and benched
+the ACTUAL wide-deep model (batch 8, 230×297): eager 1.377s, aot_eager 1.403s, default 1.543s (compiled in
+19.7s — **works, no hang, no codegen bug**), reduce-overhead 1.482s. So the Metal Inductor backend is now
+functional on the real model — but **slower than eager**: the probe's ~21% gain was a small-model artifact;
+the real conv-heavy U-Net is already eager-optimal on MPS and inductor adds overhead. **Decision: do NOT
+upgrade — stay on 2.9.1 eager. The compile path offers no speedup for this model on this hardware.**
+Compile question closed. (Epoch cost stays ~13 min, which caps overnight experiment throughput — the real
+limiter, not compile.)
 
 ## 2026-06-06 — v4 baseline established: spread solved, ignition plateaus below GBT (architecture-bound)
 
