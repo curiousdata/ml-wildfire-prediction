@@ -1,0 +1,9 @@
+{
+  "method": "isotonic on true-prevalence VAL (corrects neg-subsample bias)",
+  "test_ece_raw": 0.003152873230068679,
+  "test_ece_calibrated": 0.00019869885768481103,
+  "test_brier_raw": 0.0008765108066025139,
+  "test_brier_calibrated": 0.00013431077130482706,
+  "test_ap_raw": 0.28517576932172584,
+  "test_ap_calibrated": 0.2703727777501003
+}
