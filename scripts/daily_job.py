@@ -17,6 +17,7 @@ Inspect with --show.
 """
 from __future__ import annotations
 import argparse
+import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,7 +51,33 @@ def _load():
     return feats, ds, art["model"], calib, ccaa
 
 
-def _log(issue, target, prob, regg, today_fire, Xn, feats, ccaa, alert_thr, source_tag):
+def day_drivers(gbt, Xn, regg, prob, feats, topk_cells=200, topk=6):
+    """Per-DAY attribution: what pushed THIS prediction up. For the day's highest-risk cells (per regime),
+    zero each feature (= its training mean — features are normalized) and measure the mean predicted-risk
+    DROP. A large positive drop ⇒ that feature's actual value today is driving risk up. Dependency-free
+    (no SHAP); occlusion-to-baseline, so it's an approximation that ignores feature interactions."""
+    C = Xn.shape[0]
+    Xf = Xn.reshape(C, -1).T
+    flat_p = np.asarray(prob).ravel(); regf = np.asarray(regg).ravel()
+    out = {}
+    for name, code in (("ignition", 1), ("spread", 2)):
+        idx = np.where(regf == code)[0]
+        if idx.size == 0:
+            continue
+        k = min(topk_cells, idx.size)
+        focus = idx[np.argsort(flat_p[idx])[::-1][:k]]   # the relatively-highest-risk cells of this regime
+        Xfoc = Xf[focus]
+        base = gbt.predict_proba(Xfoc)[:, 1].mean()
+        drops = np.empty(C)
+        for j in range(C):
+            Xo = Xfoc.copy(); Xo[:, j] = 0.0
+            drops[j] = base - gbt.predict_proba(Xo)[:, 1].mean()
+        order = np.argsort(drops)[::-1][:topk]
+        out[name] = [{"feature": feats[j], "drop": float(drops[j])} for j in order if drops[j] > 1e-5]
+    return out
+
+
+def _log(issue, target, prob, regg, today_fire, Xn, feats, ccaa, alert_thr, source_tag, refreshed=None, gbt=None):
     """Write inference (region summary) + grid + feature-stats for one issued prediction."""
     import logging
     log = logging.getLogger("daily_job")
@@ -71,8 +98,10 @@ def _log(issue, target, prob, regg, today_fire, Xn, feats, ccaa, alert_thr, sour
     (STORE / "inference").mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_parquet(STORE / "inference" / f"issue_date={issue}.parquet", index=False)
     (STORE / "grids").mkdir(parents=True, exist_ok=True)
+    drivers = day_drivers(gbt, Xn, regg, prob, feats) if gbt is not None else {}
     np.savez_compressed(STORE / "grids" / f"{issue}.npz", prob=prob, regime=regg,
-                        today_fire=today_fire, issue_date=issue, target_date=target, source=source_tag)
+                        today_fire=today_fire, issue_date=issue, target_date=target, source=source_tag,
+                        fetched_at=now, refreshed=json.dumps(refreshed or []), drivers=json.dumps(drivers))
     Xland = Xn.reshape(C, -1)[:, land2d.ravel()]
     fs = [dict(date=issue, feature=feats[j], mean=float(np.nanmean(Xland[j])), std=float(np.nanstd(Xland[j])),
                min=float(np.nanmin(Xland[j])), max=float(np.nanmax(Xland[j])),
@@ -97,7 +126,7 @@ def run_day(idx, feats, ds, gbt, calib, ccaa, overwrite, alert_thr):
     prob = np.zeros(H * W, np.float32); prob[land] = p
     prob, regg = prob.reshape(H, W), reg[0].numpy()
     today_fire = (ds.ds["is_fire"].sel(time=ds.get_time_value(idx)).values > 0.5).astype(np.float32)
-    _log(issue, target, prob, regg, today_fire, Xn, feats, ccaa, alert_thr, "replay")
+    _log(issue, target, prob, regg, today_fire, Xn, feats, ccaa, alert_thr, "replay", gbt=gbt)
 
 
 def run_live(date, feats, ds, gbt, calib, ccaa, overwrite, alert_thr):
@@ -124,7 +153,8 @@ def run_live(date, feats, ds, gbt, calib, ccaa, overwrite, alert_thr):
     log.info(f"{date} live: refreshed {refreshed}")
     prob = LS.predict(gbt, calib, Xn, regg)
     target = (_dt.date.fromisoformat(date) + _dt.timedelta(days=1)).isoformat()
-    _log(date, target, prob, regg, today_fire, Xn, feats, ccaa, alert_thr, f"live:{src}+firms")
+    _log(date, target, prob, regg, today_fire, Xn, feats, ccaa, alert_thr, f"live:{src}+firms",
+         refreshed=refreshed, gbt=gbt)
 
 
 def show():

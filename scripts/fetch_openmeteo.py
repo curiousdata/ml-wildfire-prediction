@@ -84,6 +84,38 @@ def fetch_grid(date: str, daily_vars, bbox=SPAIN_BBOX, step=0.25, source="archiv
     return plon, plat, out
 
 
+def fetch_grid_range(start: str, end: str, daily_vars, bbox=SPAIN_BBOX, step=0.5, source="archive",
+                     batch=100, models=None):
+    """Like fetch_grid but for a DATE RANGE — returns (lons, lats, {var: array[n_days, n_points]}, dates).
+    The archive endpoint serves the whole [start,end] window in ONE request per coord-batch (cheap).
+    `models` (e.g. 'era5_land') selects the reanalysis model — use era5_land to match the IberFire cube."""
+    w, s, e, n = bbox
+    lons = np.arange(w, e + 1e-9, step); lats = np.arange(s, n + 1e-9, step)
+    LON, LAT = np.meshgrid(lons, lats); plon, plat = LON.ravel(), LAT.ravel()
+    url = ARCHIVE if source == "archive" else FORECAST
+    out, dates = None, None
+    for b0 in range(0, plon.size, batch):
+        sl = slice(b0, b0 + batch)
+        params = {"latitude": ",".join(f"{x:.4f}" for x in plat[sl]),
+                  "longitude": ",".join(f"{x:.4f}" for x in plon[sl]),
+                  "daily": ",".join(daily_vars), "timezone": "UTC", "start_date": start, "end_date": end}
+        if models:
+            params["models"] = models
+        js = _get(url, params); js = js if isinstance(js, list) else [js]
+        if out is None:
+            dates = js[0]["daily"]["time"]
+            out = {v: np.full((len(dates), plon.size), np.nan) for v in daily_vars}
+        for k, item in enumerate(js):
+            d = item.get("daily", {})
+            for v in daily_vars:
+                a = d.get(v)
+                if a:
+                    out[v][:, b0 + k] = [(x if x is not None else np.nan) for x in a]
+        if b0 + batch < plon.size:
+            time.sleep(1.0)
+    return plon, plat, out, dates
+
+
 def regrid_to_cube(plon, plat, vals, gx, gy, epsg=3035):
     """Bilinear-regrid scattered lat/lon point values onto the cube grid (EPSG:3035)."""
     tx, ty = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg}", always_xy=True).transform(plon, plat)

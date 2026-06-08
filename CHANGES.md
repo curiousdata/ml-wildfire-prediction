@@ -10,6 +10,88 @@ current dated entry — what was wrong, its impact, and the fix (or that it's fl
 
 ---
 
+## 2026-06-07 — Live antecedent dryness (A.1) — done & validated; + a FIRMS-vs-EFFIS fire mismatch found
+
+`live_slice.py` now computes the antecedent-dryness features LIVE: fetch the last 90 days of Open-Meteo
+precip+temp in one range request per batch (`fetch_grid_range`), regrid to a daily stack, and recompute
+`precip_sum_7/30/90d`, `total_precipitation_mean`, `kbdi` with the SAME `feature_engineering` functions the
+cube used (precip /24 to match the cube's hourly-mean units; KBDI seeded q0 from the cube's seasonal value).
+Wired into `daily_job --mode live`.
+
+**Validated (isolated, FIRMS off, cube date 2024-07-15): live-slice prediction vs cube MAE 0.00013, corr
+0.997** — i.e., the live antecedent dryness keeps predictions essentially identical to the cube. At the
+FEATURE level the precip sums show pattern corr 0.83–0.93 but a magnitude bias (Open-Meteo default ERA5 vs
+the cube's ERA5-Land precip — and ERA5-Land precip is NOT exposed by Open-Meteo, returns null), yet that
+bias WASHES OUT in the prediction (normalized features + GBT precip-robustness, per the shift test).
+`days_since_rain` is excluded from the live overwrite (poor transfer, corr 0.16) — see the
+**Known live-serving inconsistencies** subsection below for the mechanism and fix path.
+
+### Known live-serving inconsistencies (solvable later — written down so they are not forgotten)
+Each is a place where the *live* feature value diverges from how the cube built it. None silently dropped;
+all either warm-started (seasonal cube value) or flagged. Measured on cube date 2024-07-15
+(`live_slice.py --validate-dryness`), live vs cube:
+
+1. **`days_since_rain` — live value is noise; warm-started instead (corr 0.16, MAE 9.3 days).** It's a
+   *consecutive-day threshold counter* (`#days with precip < DRY_DAY_THRESHOLD_MM`). The live precip is
+   Open-Meteo **ERA5** (ERA5-Land daily precip is not exposed → returns null); the cube used **ERA5-Land**.
+   The two differ in *magnitude*, which flips the dry/wet classification on borderline days, and because the
+   feature is a *consecutive* counter those flips compound (a reset/extension propagates the whole run).
+   Contrast the integrating antecedents, which absorb the same magnitude bias: `precip_sum_7/30/90d`
+   corr **0.84 / 0.83 / 0.93**, `kbdi` corr **0.70** — all kept live. So `days_since_rain` is NOT recomputed
+   live; it keeps the cube's seasonal (day-of-year) value, which is at least correct climatology, just not
+   today's actual dry-spell length. **Fix path:** (a) source ERA5-Land daily precip so the hard threshold
+   behaves (no Open-Meteo route today), or (b) accumulate the daily-job's own precip series forward and count
+   dry days on that self-consistent stream. Both wait on the live pipeline maturing.
+2. **Precip magnitude bias on the sums/KBDI (ERA5 vs ERA5-Land).** Pattern is right (corr 0.83–0.93) but
+   magnitude is biased (e.g. `precip_sum_90d` MAE 71 mm on cube-mean 77; `kbdi` MAE 97 on mean 58). It WASHES
+   OUT in the prediction (normalized features + GBT precip-robustness → pred-corr 0.997), so it is accepted
+   for now, but it is a real feature-level inconsistency. **Fix path:** same ERA5-Land sourcing as (1).
+3. **Model fire is EFFIS-consistent but warm-started while the EFFIS WFS is down** (see fire-mismatch note
+   below). Live fire definition matches training; today's actual perimeters are pending endpoint recovery.
+4. **⚠️ PHANTOM SPREAD-RISK while EFFIS is down (surfaced 2026-06-07 on the present-day forecast run).** The
+   fire warm-start pulls the *nearest day-of-year* cube slice — for a 2026-06-06 prediction that's
+   **2024-06-05**, which had real fires. So `dist_to_fire`/regime import *last year's* fire geography:
+   the live 2026-06-06 run produced **13 spread-regime cells and a peak risk of 82%**, and ALL 4 cells ≥20%
+   were those spread cells — i.e. the entire HIGH headline came from cells that "think" a fire is burning
+   next door, inherited from 2024. (The per-day occlusion attribution caught it: spread's #1 driver was
+   `dist_to_fire`, drop 0.51.) The 40,951 ignition cells were correctly low. Mitigated in the app by a
+   **degraded-input banner** + the warm-start flag; the real fix is live EFFIS, or — decision pending —
+   deriving the model's `dist_to_fire` from **today's FIRMS** hotspots when EFFIS is down (current fire
+   geography, definition-mismatched) vs. treating "no live burned-area" as **no-fire/all-ignition** vs.
+   keeping the (worst) 2024 warm-start.
+   **✅ FIXED (2026-06-07, persistence cascade — user's idea, the weather-forecasting persistence baseline).**
+   Fire features now NEVER warm-start from the seasonal cube. `build_live_slice` uses a recency cascade:
+   (1) **live EFFIS today** → cached to `data/serving_store/effis_cache/`; (2) **most-recent CACHED EFFIS**
+   (persisted from a prior run) → used and shown dated ("fire as of {date}"); (3) **cold-start, no cache →
+   NO-FIRE / all-ignition** (`is_fire=0`, `dist_to_fire=max`, every land cell ignition) — never invent fire.
+   FIRMS stays display-only. Verified on the 2026-06-07 live run: regime = **40,964 ignition / 0 spread**,
+   **peak risk 82% → 2.6%**, 0 cells ≥20% — the phantom is gone. The app shows a degraded-input banner naming
+   the exact fire tier. (Variant 2 — autoregressive: predict today's label, feed it to predict tomorrow —
+   noted as a future enhancement; it compounds model error into an input and needs separate validation.)
+5. **Antecedent dryness fails on the present-day FORECAST path (ValueError → warm-start).** Open-Meteo's
+   *forecast* endpoint returns the 91 date slots but **all-NaN daily precip/temp** for past days, so
+   `regrid_to_cube` gets no valid points and raises. **✅ FIXED (2026-06-07):** `live_antecedent_dryness`
+   now ALWAYS fetches the 90-day stack from the **archive** (ERA5, which has the daily precip history) and
+   **drops all-NaN tail days** that fall inside archive's ~5-day latency, computing antecedents over the
+   available history (a 90-day sum tolerates a few-day-stale tail; raises only if <7 valid days). Verified on
+   the 2026-06-07 live run: `precip_sum_7/30/90d`, `kbdi`, `antecedent-dryness` all refreshed live.
+
+**Finding — fire-feature train/serve mismatch (next priority).** With FIRMS enabled the same validation
+dropped to pred-corr 0.10: FIRMS *active-fire* (375 m hotspots) ≠ the cube's EFFIS *burned-area >5 ha* that
+the model trained on, so `dist_to_fire`/regime differ and predictions shift hard. The fire-history features
+are the impactful live signal AND the most mismatched. Fix options: source **EFFIS NRT burned-area** (matches
+the training definition) instead of FIRMS active-fire; or recalibrate/retrain on FIRMS-derived fire features.
+
+**FIXED (decision + implementation).** FIRMS isn't worth relearning — its latency/resolution edge only helps
+the *display*, not the model — so: **model fire features ← EFFIS burned-area (matches training); FIRMS ←
+display only.** `fetch_effis.py` (open WFS `ercc.ba` → transform 4326→3035 → `rasterio.features.rasterize`
+→ `dist_to_fire`; rasterize chain validated offline). `build_live_slice(fire_source="effis")` overwrites
+is_fire/dist_to_fire/regime from EFFIS, **falling back to the cube's EFFIS-consistent warm-start if the
+EFFIS endpoint is down** (NOT FIRMS); FIRMS only sets the display `today_fire`. Validated: decoupling FIRMS
+from the model restores **pred-corr 0.10 → 0.997**. ⚠️ EFFIS open WFS backend (ies-ows) is currently
+returning an OracleSpatial error (server-side, transient) → live model-fire is warm-started for now; it
+switches to live EFFIS automatically when their endpoint recovers (retry + fallback in place).
+
 ## 2026-06-07 — LIVE MVP: end-to-end same-day prediction on real feeds (Open-Meteo + FIRMS)
 
 `daily_job.py --mode live --date D` now produces a genuine live next-day prediction from REAL data:
