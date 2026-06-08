@@ -42,17 +42,24 @@ DAILY_MAP = {"temperature_2m_mean": "t2m_mean", "temperature_2m_max": "t2m_max",
              "wind_speed_10m_max": "wind_speed", "wind_direction_10m_dominant": "wind_direction"}
 
 
-def _get(url, params, tries=6):
-    """GET with backoff on 429/5xx (Open-Meteo free tier is rate-limited per minute), honoring Retry-After."""
+def _get(url, params, tries=6, timeout=120):
+    """GET with backoff on 429/5xx AND on network timeouts/connection errors (hourly multi-var requests are
+    large and the free tier is flaky), honoring Retry-After."""
     import requests
+    last_exc = None
     for i in range(tries):
-        r = requests.get(url, params=params, timeout=90)
+        try:
+            r = requests.get(url, params=params, timeout=timeout)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            last_exc = e; time.sleep(min(2 ** i * 5, 60)); continue
         if r.status_code == 429 or r.status_code >= 500:
             wait = int(r.headers.get("Retry-After", 0)) or min(2 ** i * 5, 60)  # 5,10,20,40,60,60s
             time.sleep(wait)
             continue
         r.raise_for_status()
         return r.json()
+    if last_exc is not None:
+        raise last_exc
     r.raise_for_status()
 
 
@@ -114,6 +121,39 @@ def fetch_grid_range(start: str, end: str, daily_vars, bbox=SPAIN_BBOX, step=0.5
         if b0 + batch < plon.size:
             time.sleep(1.0)
     return plon, plat, out, dates
+
+
+def fetch_grid_hourly_range(start: str, end: str, hourly_vars, bbox=SPAIN_BBOX, step=0.5, source="archive",
+                            batch=60, models=None):
+    """Hourly counterpart of fetch_grid_range — returns (lons, lats, {var: array[n_hours, n_points]}, times).
+    Needed for the variables Open-Meteo does NOT expose as daily aggregates (RH, surface_pressure, hourly
+    wind speed/direction → daily mean/min/max/range and at-max-speed). Smaller default batch since each
+    point returns 24×n_days values."""
+    w, s, e, n = bbox
+    lons = np.arange(w, e + 1e-9, step); lats = np.arange(s, n + 1e-9, step)
+    LON, LAT = np.meshgrid(lons, lats); plon, plat = LON.ravel(), LAT.ravel()
+    url = ARCHIVE if source == "archive" else FORECAST
+    out, times = None, None
+    for b0 in range(0, plon.size, batch):
+        sl = slice(b0, b0 + batch)
+        params = {"latitude": ",".join(f"{x:.4f}" for x in plat[sl]),
+                  "longitude": ",".join(f"{x:.4f}" for x in plon[sl]),
+                  "hourly": ",".join(hourly_vars), "timezone": "UTC", "start_date": start, "end_date": end}
+        if models:
+            params["models"] = models
+        js = _get(url, params); js = js if isinstance(js, list) else [js]
+        if out is None:
+            times = js[0]["hourly"]["time"]
+            out = {v: np.full((len(times), plon.size), np.nan) for v in hourly_vars}
+        for k, item in enumerate(js):
+            h = item.get("hourly", {})
+            for v in hourly_vars:
+                a = h.get(v)
+                if a:
+                    out[v][:, b0 + k] = [(x if x is not None else np.nan) for x in a]
+        if b0 + batch < plon.size:
+            time.sleep(1.0)
+    return plon, plat, out, times
 
 
 def regrid_to_cube(plon, plat, vals, gx, gy, epsg=3035):
