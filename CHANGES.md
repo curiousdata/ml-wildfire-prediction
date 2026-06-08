@@ -10,6 +10,43 @@ current dated entry — what was wrong, its impact, and the fix (or that it's fl
 
 ---
 
+## 2026-06-08 — Fire Guard Datacube (FGDC): recollect the cube from operational, same-source providers
+
+**The strategic pivot behind the live track.** Every live-serving hack so far (persistence cascade, archive
+antecedents, the whole "Known live-serving inconsistencies" list) is a symptom of ONE root cause: the v1
+cube was downloaded as a frozen Zenodo NetCDF, so its sources and our live feeds are *different products*.
+Trained-on-EFFIS vs served-FIRMS fire dropped prediction-corr to 0.10. The fix is structural — **rebuild
+the cube from the reliable, append-daily providers we actually serve from, using the same code path for the
+historical backfill and the daily append.** Train and serve become one store; warm-starts retire.
+
+Named the **Fire Guard Datacube (FGDC)** (slug `fireguard`) — successor to IberFire v1 but **non-destructive**:
+v1 cube/model/feature-order/app all stay; FGDC is additive under `src/data/ingest/` and
+`data/{bronze,silver,gold}/fireguard/`, cutover is a reversible config repoint.
+
+**Decisions (evidence-backed; full research + citations in the session and the plan):**
+- **Resolution** — collect at **1 km native** (EPSG:3035), coarsen to 4 km as now.
+- **Fire** — **VIIRS 375 m active-fire (FIRMS VNP14IMG)** for BOTH label and fire-context features (label =
+  ≥1 next-day detection at confidence ≥ nominal; no ha threshold). VIIRS is a markedly more *learnable*
+  next-day target than MODIS active-fire (MOD14 "highly stochastic"; VNP14 "a much better option" —
+  Karlsson et al. 2025, [arXiv:2503.08580](https://arxiv.org/abs/2503.08580)), and one source for
+  label+features gives train=serve identity. EFFIS burned-area kept as an **offline aux eval layer** only.
+- **Span** — **2012 → present, rolling** (VIIRS era). Lose 2007–2011; gain a consistent, append-daily label.
+- **Vegetation** — **MODIS MOD13/MCD15 + VIIRS VNP13/VNP15** spine (same lineage, long overlap → seam frozen
+  in the past, harmonizable). NDVI primary + derived FVC + NDWI/NDMI. Rejected Sentinel (1 km↔10 m break at
+  the serve edge, 2015 start) and CLMS (forward platform churn + 1 km→300 m seam).
+
+**Reference corrections (this entry's housekeeping).** The IberFire dataset is
+[arXiv:2505.00837](https://arxiv.org/abs/2505.00837) — **Erzibengoa**, Gómez-Omella & Goienetxea (2025);
+1 km × 1 km × 1 day, Dec 2007–Dec 2024, **120 features in 8 categories** (the cube materialises more once
+one-hots expand). Weather backbone = ERA5-Land (Muñoz-Sabater et al. 2021, ESSD 13:4349); VIIRS 375 m fire =
+Schroeder et al. 2014 (RSE).
+
+**P0 done.** `src/data/ingest/grid.py` — canonical 1 km EPSG:3035 grid, **aligned to v1**: 920×1188, origins
+(2674734.3466, 2492195.9911) ±1000 m; `--verify` confirms block-mean ×4 reproduces v1's coarse4 x/y centres
+exactly (so FGDC gold shares v1's grid → clean per-cell A/B). Provisional masks refined ×4 from v1 (P3
+re-derives from CORINE/DEM). Next: P1 vertical slice (ERA5-Land weather + VIIRS fire + terrain → silver →
+coarsen → train).
+
 ## 2026-06-07 — Live antecedent dryness (A.1) — done & validated; + a FIRMS-vs-EFFIS fire mismatch found
 
 `live_slice.py` now computes the antecedent-dryness features LIVE: fetch the last 90 days of Open-Meteo
