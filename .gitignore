@@ -55,3 +55,12 @@ models/se_resnext50_32x4d_v1.pth
 models/*.pth
 CLAUDE.md
 ROADMAP.md
+.mcp.json
+logs/night_worklog.md
+.env
+
+# Serving store (runtime inference + feature logs)
+data/serving_store/
+
+# Agent runtime lock
+.claude/scheduled_tasks.lock
