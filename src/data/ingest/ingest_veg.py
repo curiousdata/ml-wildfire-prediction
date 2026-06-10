@@ -136,10 +136,14 @@ def build_range(start, end):
         for feat, (asset, scale, vmin, vmax) in assets.items():
             stack, dts = [], []
             for cd in comp_dates:
+                try:
+                    arr = _mosaic_reproject(bycomp[cd], asset, vmin, vmax) * scale
+                except Exception as e:           # one bad/expired-URL composite must not abort the run
+                    log.warning(f"  skip {asset} composite {cd}: {type(e).__name__} {e}"); continue
                 yr, doy = int(cd[1:5]), int(cd[5:8])
-                dts.append(_dt.date(yr, 1, 1) + _dt.timedelta(days=doy - 1))
-                stack.append(_mosaic_reproject(bycomp[cd], asset, vmin, vmax) * scale)
-            res[feat] = (dts, np.stack(stack))
+                dts.append(_dt.date(yr, 1, 1) + _dt.timedelta(days=doy - 1)); stack.append(arr)
+            if stack:
+                res[feat] = (dts, np.stack(stack))
     return res
 
 
@@ -156,16 +160,26 @@ def daily_interp(dates_comp, stack, day):
     return (1 - w) * stack[j - 1] + w * stack[j]
 
 
-def write_range(start, end):
+def write_range(start, end, chunk_days=92):
+    """Chunked + resumable backfill. Process in ~quarterly windows so MODIS COG search+read stay close in
+    time (MPC signed URLs expire after hours) and days persist per chunk. Skips chunks already fully written."""
+    import logging
+    log = logging.getLogger("ingest_veg")
     BRONZE.mkdir(parents=True, exist_ok=True)
-    res = build_range(start, end)
     d = _dt.date.fromisoformat(start); last = _dt.date.fromisoformat(end)
     while d <= last:
-        ds = d.isoformat()
-        out = {feat: daily_interp(dts, stk, ds).astype(np.float32) for feat, (dts, stk) in res.items()}
-        np.savez_compressed(BRONZE / f"{ds}.npz", **out)
-        d += _dt.timedelta(days=1)
-    return res
+        cend = min(d + _dt.timedelta(days=chunk_days - 1), last)
+        days = [(d + _dt.timedelta(days=k)).isoformat() for k in range((cend - d).days + 1)]
+        if all((BRONZE / f"{x}.npz").exists() for x in days):
+            log.info(f"{d}..{cend}: all exist, skip"); d = cend + _dt.timedelta(days=1); continue
+        res = build_range(d.isoformat(), cend.isoformat())
+        for ds in days:
+            if (BRONZE / f"{ds}.npz").exists():
+                continue
+            out = {feat: daily_interp(dts, stk, ds).astype(np.float32) for feat, (dts, stk) in res.items()}
+            np.savez_compressed(BRONZE / f"{ds}.npz", **out)
+        log.info(f"{d}..{cend}: wrote {len(days)} days ({len(res)} veg features)")
+        d = cend + _dt.timedelta(days=1)
 
 
 def main():
