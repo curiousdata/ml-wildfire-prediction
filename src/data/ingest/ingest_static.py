@@ -118,6 +118,19 @@ def build_epochs(prod):
     return out
 
 
+def load_cached_epochs(prod):
+    """{year: grid[NY,NX]} for whatever epoch caches already exist (no download) — used by build_silver."""
+    import re
+    out = {}
+    if not BRONZE.exists():
+        return out
+    for p in BRONZE.glob(f"*_{prod}_*_1km3035.npz"):
+        m = re.search(rf"_{prod}_(\d{{4}})_1km3035", p.name)
+        if m:
+            out[int(m.group(1))] = np.load(p)["a"]
+    return out
+
+
 def interp_to_date(epoch_arrays, date):
     """Linear-interpolate the epoch stack to a calendar `date` (the temporal-interpolation feature).
     Clamps outside the epoch range (no extrapolation)."""

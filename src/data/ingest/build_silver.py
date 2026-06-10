@@ -30,6 +30,7 @@ from src.data.ingest import grid
 from src.data.ingest import ingest_weather as IW
 from src.data.ingest import ingest_fire as IF
 from src.data.ingest import ingest_veg as IV
+from src.data.ingest import ingest_static as IS
 
 SILVER = grid.ROOT / "data" / "silver" / "FireGuard.zarr"
 
@@ -42,11 +43,13 @@ def _dates_present():
 
 
 def _load_static(refine=True):
-    """v1 static vars (dims y,x) refined ×4 onto the 1 km grid → {name: array[NY,NX]}."""
+    """v1 static vars (dims y,x) refined ×4 onto the 1 km grid → {name: array[NY,NX]}. EXCLUDES v1's
+    popdens_* (WorldPop, stops 2020) — the FGDC sources population from GHS-POP instead (added per-day,
+    temporally interpolated, in build())."""
     z = xr.open_zarr(str(grid.V1_CUBE), consolidated=True)
     out = {}
     for v in z.data_vars:
-        if "time" not in z[v].dims:                       # static layer
+        if "time" not in z[v].dims and not v.startswith("popdens"):
             arr = np.asarray(z[v].values, np.float32)
             out[v] = grid.refine_to_1km(arr) if refine else arr
     return out
@@ -81,6 +84,16 @@ def build(start, end, out=SILVER, with_static=True):
             vv = np.load(IV.BRONZE / f"{d}.npz")
             for k in vkeys:
                 dyn[k][i] = vv[k] if k in vv.files else np.nan
+
+    # --- GHS-POP / GHS-BUILT-S: temporally INTERPOLATED per day (replaces v1's stale popdens) ---
+    ghs = {p: IS.load_cached_epochs(p) for p in ("popdens", "built_s")}
+    ghs = {p: e for p, e in ghs.items() if e}            # only those with cached epochs
+    for p, epochs in ghs.items():
+        log.info(f"GHS {p}: interpolating per day from cached epochs {sorted(epochs)}")
+        arr = np.empty((len(dates), grid.NY, grid.NX), np.float32)
+        for i, d in enumerate(dates):
+            arr[i] = IS.interp_to_date(epochs, d)
+        dyn[p] = arr
 
     data_vars = {k: (("time", "y", "x"), v) for k, v in dyn.items()}
     if with_static:

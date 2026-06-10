@@ -103,15 +103,16 @@ def _mosaic_reproject(items, asset, vmin=None, vmax=None):
     """Mosaic the Spain sinusoidal tiles for one composite, reproject onto the 1 km grid → [NY,NX] float32.
     Masks DN outside [vmin,vmax] to NaN on the RAW tiles (before reproject) so MODIS QA fill values don't
     blend in or survive scaling."""
-    import xarray as _xr
+    from concurrent.futures import ThreadPoolExecutor
     from rioxarray.merge import merge_arrays
-    tiles = []
-    for it in items:
+
+    def _one(it):
         t = _read_tile(it.assets[asset].href)
         if vmin is not None:
             t = t.where((t >= vmin) & (t <= vmax))   # fills/out-of-range → NaN
-        t = t.rio.write_nodata(np.nan)               # so reproject propagates NaN, not 0, to gaps
-        tiles.append(t)
+        return t.rio.write_nodata(np.nan)            # so reproject propagates NaN, not 0, to gaps
+    with ThreadPoolExecutor(max_workers=4) as ex:   # tile reads are I/O-bound → parallelize (~4× faster)
+        tiles = list(ex.map(_one, items))
     mos = merge_arrays(tiles, nodata=np.nan) if len(tiles) > 1 else tiles[0]
     out = mos.rio.reproject_match(_target(), nodata=np.nan)
     return out.values.astype(np.float32)

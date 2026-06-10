@@ -144,7 +144,8 @@ def main():
         write_day(date); log.info(f"wrote weather {date}"); return
     if "--backfill" in a:
         i = a.index("--backfill"); start, end = a[i + 1], a[i + 2]
-        backfill_range(start, end); return
+        step = float(a[a.index("--step") + 1]) if "--step" in a else FETCH_STEP
+        backfill_range(start, end, step=step); return
     print("Use --validate DATE | --backfill START END | --append [DATE]", file=sys.stderr)
 
 

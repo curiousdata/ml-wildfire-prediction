@@ -30,8 +30,8 @@ GOLD = grid.ROOT / "data" / "gold" / "FireGuard_coarse4.zarr"
 DYN = ["t2m_mean", "t2m_max", "t2m_min", "t2m_range", "RH_mean", "RH_min", "RH_max",
        "surface_pressure_mean", "wind_speed_mean", "wind_speed_max", "wind_u_mean", "wind_v_mean",
        "total_precipitation_mean", "soil_moisture_mean", "soil_temperature_mean",
-       "NDVI", "EVI", "LAI", "FAPAR", "LST"]
-STAT = ["elevation_mean", "slope_mean", "popdens", "dist_to_roads_mean",
+       "NDVI", "EVI", "LAI", "FAPAR", "LST", "popdens", "built_s"]   # popdens/built_s = GHS, interpolated daily
+STAT = ["elevation_mean", "slope_mean", "dist_to_roads_mean",
         "CLC_2018_forest_and_semi_natural_proportion", "CLC_2018_scrub_proportion",
         "CLC_2018_artificial_proportion"]
 
@@ -45,7 +45,7 @@ def _group(name):
         return "weather"
     if name.startswith("soil_"):
         return "soil_moisture"
-    if name in ("popdens", "dist_to_roads_mean") or name.endswith("artificial_proportion"):
+    if name in ("popdens", "built_s", "dist_to_roads_mean") or name.endswith("artificial_proportion"):
         return "human"
     if name.startswith("CLC_") or name.endswith("_proportion"):
         return "fuel_cover"
