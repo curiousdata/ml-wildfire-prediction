@@ -88,6 +88,35 @@ def write_day(date):
     return out
 
 
+def backfill_range(start, end, chunk_days=30, step=FETCH_STEP):
+    """Efficient backfill: Open-Meteo serves a whole date RANGE in one request per coord-batch, so we fetch
+    the hourly+daily stack in chunk_days windows (one fetch per chunk, not per day), then aggregate+regrid
+    +write each day. ~chunk_days× fewer requests than per-day. Resumable (skips days whose npz exists)."""
+    import logging
+    log = logging.getLogger("ingest_weather")
+    BRONZE.mkdir(parents=True, exist_ok=True)
+    gx, gy = grid.x_coords(), grid.y_coords()
+    d = _dt.date.fromisoformat(start); last = _dt.date.fromisoformat(end)
+    while d <= last:
+        cend = min(d + _dt.timedelta(days=chunk_days - 1), last)
+        days = [(d + _dt.timedelta(days=k)).isoformat() for k in range((cend - d).days + 1)]
+        if all((BRONZE / f"{x}.npz").exists() for x in days):
+            log.info(f"{d}..{cend}: all exist, skip"); d = cend + _dt.timedelta(days=1); continue
+        plon, plat, hv, times = OM.fetch_grid_hourly_range(d.isoformat(), cend.isoformat(), HOURLY_VARS,
+                                                           step=step, models="era5")
+        _, _, dly, ddates = OM.fetch_grid_range(d.isoformat(), cend.isoformat(), ["precipitation_sum"],
+                                                step=step, models="era5")
+        didx = {dt: k for k, dt in enumerate(ddates)}
+        for x in days:
+            if (BRONZE / f"{x}.npz").exists():
+                continue
+            feats = daily_point_features(hv, times, dly["precipitation_sum"][didx[x]], x)
+            out = {f: OM.regrid_to_cube(plon, plat, vec, gx, gy).astype(np.float32) for f, vec in feats.items()}
+            np.savez_compressed(BRONZE / f"{x}.npz", **out)
+        log.info(f"{d}..{cend}: wrote {len(days)} days ({step}° fetch, 1 chunk request)")
+        d = cend + _dt.timedelta(days=1)
+
+
 def main():
     import logging
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -115,15 +144,7 @@ def main():
         write_day(date); log.info(f"wrote weather {date}"); return
     if "--backfill" in a:
         i = a.index("--backfill"); start, end = a[i + 1], a[i + 2]
-        d = _dt.date.fromisoformat(start); last = _dt.date.fromisoformat(end)
-        while d <= last:
-            ds = d.isoformat()
-            if (BRONZE / f"{ds}.npz").exists():
-                log.info(f"{ds}: exists, skip")
-            else:
-                write_day(ds); log.info(f"wrote weather {ds}")
-            d += _dt.timedelta(days=1)
-        return
+        backfill_range(start, end); return
     print("Use --validate DATE | --backfill START END | --append [DATE]", file=sys.stderr)
 
 

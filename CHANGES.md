@@ -10,6 +10,32 @@ current dated entry — what was wrong, its impact, and the fix (or that it's fl
 
 ---
 
+## 2026-06-10 — FGDC P2 vegetation complete + ablation practice established
+
+**Vegetation (P2) done & validated, keyless.** `ingest_veg.py` pulls MODIS NDVI/EVI (13A1), LAI/FAPAR (15A2H),
+LST (11A2) from **Microsoft Planetary Computer** (no Earthdata login) → mosaic Spain tiles → reproject_match
+to the 1 km grid → composite→daily interp. NDVI vs v1 corr **0.9918**. Folded into `build_silver` (261 vars
+now: 27 dynamic + 234 static) → coarsen → train. Deployment decision recorded (HF Space + GH-Actions engine,
+deferred). giga-spatial assessed & rejected (DGGS-only, no projected-grid/temporal model).
+
+**Ablation practice established (user-requested).** New committed **`ABLATIONS.md`** registry + reusable
+`scripts/fgdc_ablation.py` (leave-one-group-out + target-horizon, identical-setup with/without, AP+ROC).
+Rule: every major feature/source/target change gets a documented with/vs/without entry before it's "kept".
+First clean results (Aug-2016 slice, directional):
+- **Multi-horizon target (user idea): KEEP (strong)** — val AP 0.026 (1d) → 0.148 (3d) → 0.226 (7d).
+- **Leave-one-group-out:** **human features dominate (+0.030 AP)** — validates the GHS-POP/BUILT investment;
+  vegetation modest (+0.003) on a single month (expected; re-test across seasons on the backfill).
+- Honest correction: the earlier "veg lift 0.028→0.077" was a *conflated* comparison (different horizon/
+  code); the clean ablation shows veg adds +0.003 on this slice — exactly the trap the practice catches.
+
+### Bugs found & fixed
+- **MODIS QA fill contamination** *(found → fixed)*. MOD15A2H fill DN (249–255) survived scaling → FAPAR 1.20
+  (>1!), LAI 10.2. Fixed by masking each product to its valid DN range before scaling → FAPAR ≤1, LAI ≤7.
+- **reproject_match nodata = 0** *(found → fixed)*. Reprojection filled uncovered areas with 0, not NaN →
+  20% of LST = 0 K (mean 248 K, median fine at 310). Fixed with `write_nodata(np.nan)` on the masked tiles +
+  `nodata=np.nan` through merge/reproject; LST mean back to **311.8 K**. Also dropped `nan_to_num` in the
+  trainer so HistGBT handles veg cloud-gaps natively instead of seeing a misleading 0.
+
 ## 2026-06-08 — Fire Guard Datacube (FGDC): recollect the cube from operational, same-source providers
 
 **The strategic pivot behind the live track.** Every live-serving hack so far (persistence cascade, archive
@@ -44,8 +70,44 @@ Schroeder et al. 2014 (RSE).
 **P0 done.** `src/data/ingest/grid.py` — canonical 1 km EPSG:3035 grid, **aligned to v1**: 920×1188, origins
 (2674734.3466, 2492195.9911) ±1000 m; `--verify` confirms block-mean ×4 reproduces v1's coarse4 x/y centres
 exactly (so FGDC gold shares v1's grid → clean per-cell A/B). Provisional masks refined ×4 from v1 (P3
-re-derives from CORINE/DEM). Next: P1 vertical slice (ERA5-Land weather + VIIRS fire + terrain → silver →
-coarsen → train).
+re-derives from CORINE/DEM).
+
+**P1 vertical slice — GATE PASSED.** Built + validated the dynamic ingesters and proved the full pipeline on
+recollected Aug-2016 data:
+- `ingest_weather.py` — **uniform ERA5** (era5_land lacks pressure/wind/precip via Open-Meteo) hourly→daily
+  (t2m/RH/pressure/wind→u,v/precip/soil), regrid to 1 km; `backfill_range` fetches a whole window in one
+  request/batch. Validated vs v1 (2015-07-11): t2m corr 0.95, RH 0.99, wind 0.90. Fixes: Open-Meteo wind is
+  km/h→÷3.6 m/s; `_get` now retries on timeouts.
+- `ingest_fire.py` — VIIRS_SNPP_SP archive → 1 km is_fire (conf≥nominal). Gotcha: FIRMS area API day_range
+  caps at **5** (not 10); SP covers 2012-01-20→2026-04-27, NRT tiles after. Aug-2016: 31 days, 45–65 cells/d.
+- `build_silver.py` → `silver/FireGuard.zarr` (256 vars = 22 dynamic + **234 static inherited from v1**,
+  refined ×4 — lossless at 4 km gold, static doesn't drift). `coarsen_fgdc.py` → `gold/FireGuard_coarse4.zarr`
+  (230×297; is_fire/*_max→max, *_min→min, else mean — FGDC stores wind u/v directly so v1's coarsen.py is
+  left untouched).
+- `smoke_train.py` — next-day GBT on the slice: 933,630 rows, **855 positives (0.092%)**, **ROC-AUC 0.847**
+  with no vegetation yet — sane signal, machinery proven.
+
+**P3 population decision:** source population from **GHS-POP (R2023A)** (100 m, 1975–2030 incl. projections)
+rather than re-inheriting v1's WorldPop, which stops at 2020 → stale for the FGDC's 2021→ live edge; `popdens`
+is a top-2/3 ignition driver, so its forward-staleness matters. Add **GHS-BUILT-S** (built-up surface) as an
+ablation candidate (WUI/structure exposure beyond `popdens`/CLC); keep only if importance earns it. Skip SMOD.
+
+**giga-spatial: not adopted** — assumes H3/S2/Mercator DGGS not arbitrary EPSG:3035 projected grids, no
+temporal model, 4/8 sources uncovered, AGPL+GEE. Only its WorldPop/GHSL/GADM downloaders worth referencing.
+
+**P2 vegetation — keyless via Microsoft Planetary Computer (plan refinement).** `ingest_veg.py` pulls MODIS
+**modis-13A1-061** (NDVI/EVI, 500 m 16-day) from MPC's STAC — **no NASA Earthdata login** (MPC is
+anonymous-read + SAS-signed COGs), a better fit for the FGDC keyless principle than the planned earthaccess
+route. Pipeline: search Spain sinusoidal tiles (h17/h18 × v04/v05) → mosaic → reproject_match onto the 1 km
+EPSG:3035 grid → linear composite→daily interp. **Validated: FGDC MODIS NDVI vs v1 NDVI (2016-08-14) MAE
+0.032, corr 0.9918** (v1 used CGLS; the ~+0.03 cross-sensor bias is harmonizable). MODIS covers 2012→~2026;
+VIIRS VNP13/15 forward-bridge is a later task (not on MPC; harmonize on the overlap). LAI/FAPAR (15A2H) +
+NDWI/NDMI (09A1) follow the same pattern.
+Fixes: pin `PROJ_DATA` to rasterio's bundled proj_data (shell leaks a broken conda PROJ_DATA; pyproj's db is
+version-incompatible with rasterio's GDAL); per-tile full-read-with-retry + GDAL_HTTP_MAX_RETRY for transient
+MPC COG `TIFFReadEncodedTile` partial reads.
+
+Next: fold veg into the slice + re-train; full backfill 2012→present; P3 static (GHS-POP/BUILT) + P4 parity.
 
 ## 2026-06-07 — Live antecedent dryness (A.1) — done & validated; + a FIRMS-vs-EFFIS fire mismatch found
 
