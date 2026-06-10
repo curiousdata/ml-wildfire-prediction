@@ -28,6 +28,17 @@ First clean results (Aug-2016 slice, directional):
 - Honest correction: the earlier "veg lift 0.028→0.077" was a *conflated* comparison (different horizon/
   code); the clean ablation shows veg adds +0.003 on this slice — exactly the trap the practice catches.
 
+**P3 started — GHS-POP population + temporal interpolation.** `ingest_static.py` downloads GHS-POP (and
+GHS-BUILT-S) R2023A 1 km global from JRC, clips Spain, reprojects Mollweide→1 km EPSG:3035. **Temporal
+interpolation** built (`interp_to_date` linear-between-editions vs `nearest_to_date` step-snap baseline — the
+two arms of the user-prioritized interpolation ablation). GHS-POP validated: mean **84 ppl/km²**, sensible
+2015→2020 growth (83.6→85.0). Agreement with v1's WorldPop is **moderate (log-corr 0.48)** — expected, they're
+different dasymetric products (GHS disaggregates census onto built-up; WorldPop RF-smooths); GHS-POP is chosen
+for forward-continuity to 2030 (WorldPop stops 2020), not v1 parity. **The interpolation ablation needs a
+MULTI-YEAR span** (population barely moves within one month) → queued for the full backfill, not the slice.
+Next P3: wire GHS-POP into build_silver (replace v1's stale popdens), add GHS-BUILT-S as an ablation
+candidate, inherit CORINE/OSM/Natura2000 from v1, compute calendar.
+
 ### Bugs found & fixed
 - **MODIS QA fill contamination** *(found → fixed)*. MOD15A2H fill DN (249–255) survived scaling → FAPAR 1.20
   (>1!), LAI 10.2. Fixed by masking each product to its valid DN range before scaling → FAPAR ≤1, LAI ≤7.
