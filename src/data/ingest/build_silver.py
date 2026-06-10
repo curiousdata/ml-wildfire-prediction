@@ -55,27 +55,10 @@ def _load_static(refine=True):
     return out
 
 
-def build(start, end, out=SILVER, with_static=True):
-    import logging
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-    log = logging.getLogger("build_silver")
-    from numcodecs import Blosc
-
-    dates = [d for d in _dates_present() if start <= d <= end]
-    if not dates:
-        raise SystemExit(f"no bronze days with both weather+fire in [{start},{end}] — run the ingesters first")
-    log.info(f"assembling {len(dates)} days [{dates[0]}..{dates[-1]}] on the 1 km grid {grid.shape()}")
-    gx, gy = grid.x_coords(), grid.y_coords()
-    times = pd.to_datetime(dates)
-
-    # --- dynamic: stack per-day bronze npz into [time, y, x] per feature ---
-    wkeys = list(np.load(IW.BRONZE / f"{dates[0]}.npz").files)
-    veg_present = (IV.BRONZE / f"{dates[0]}.npz").exists()
-    vkeys = list(np.load(IV.BRONZE / f"{dates[0]}.npz").files) if veg_present else []
-    if veg_present:
-        log.info(f"including {len(vkeys)} vegetation features: {vkeys}")
-    dyn = {k: np.empty((len(dates), grid.NY, grid.NX), np.float32) for k in wkeys + ["is_fire"] + vkeys}
-    for i, d in enumerate(dates):
+def _dyn_chunk(cdates, wkeys, vkeys, ghs):
+    """Build the dynamic [time,y,x] arrays for a small set of dates (bounded memory)."""
+    dyn = {k: np.empty((len(cdates), grid.NY, grid.NX), np.float32) for k in wkeys + ["is_fire"] + vkeys}
+    for i, d in enumerate(cdates):
         w = np.load(IW.BRONZE / f"{d}.npz")
         for k in wkeys:
             dyn[k][i] = w[k]
@@ -84,37 +67,59 @@ def build(start, end, out=SILVER, with_static=True):
             vv = np.load(IV.BRONZE / f"{d}.npz")
             for k in vkeys:
                 dyn[k][i] = vv[k] if k in vv.files else np.nan
-
-    # --- GHS-POP / GHS-BUILT-S: temporally INTERPOLATED per day (replaces v1's stale popdens) ---
-    ghs = {p: IS.load_cached_epochs(p) for p in ("popdens", "built_s")}
-    ghs = {p: e for p, e in ghs.items() if e}            # only those with cached epochs
-    for p, epochs in ghs.items():
-        log.info(f"GHS {p}: interpolating per day from cached epochs {sorted(epochs)}")
-        arr = np.empty((len(dates), grid.NY, grid.NX), np.float32)
-        for i, d in enumerate(dates):
+    for p, epochs in ghs.items():                         # GHS interpolated per day
+        arr = np.empty((len(cdates), grid.NY, grid.NX), np.float32)
+        for i, d in enumerate(cdates):
             arr[i] = IS.interp_to_date(epochs, d)
         dyn[p] = arr
+    return dyn
 
-    data_vars = {k: (("time", "y", "x"), v) for k, v in dyn.items()}
-    if with_static:
-        stat = _load_static()
-        log.info(f"inheriting {len(stat)} static layers from v1 (refined ×4)")
-        for k, v in stat.items():
-            data_vars[k] = (("y", "x"), v)
 
-    ds = xr.Dataset(data_vars, coords={"time": times, "y": gy, "x": gx})
-    ds.attrs.update(title="Fire Guard Datacube (silver, 1 km)", crs="EPSG:3035",
-                    dynamic_source="Open-Meteo ERA5 (weather) + FIRMS VIIRS_SNPP (fire)",
-                    static_source="inherited from IberFire v1 (refined ×4, lossless at 4 km gold)")
+def build(start, end, out=SILVER, with_static=True, chunk_days=20):
+    """Assemble silver, writing INCREMENTALLY along time (chunk_days at a time) so memory stays bounded —
+    a full multi-year build can't hold all days at once (184 days × 27 vars ≈ 22 GB)."""
+    import logging
+    import shutil
+    import zarr
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    log = logging.getLogger("build_silver")
+    from numcodecs import Blosc
+
+    dates = [d for d in _dates_present() if start <= d <= end]
+    if not dates:
+        raise SystemExit(f"no bronze days with both weather+fire in [{start},{end}] — run the ingesters first")
+    gx, gy = grid.x_coords(), grid.y_coords()
+    wkeys = list(np.load(IW.BRONZE / f"{dates[0]}.npz").files)
+    vkeys = list(np.load(IV.BRONZE / f"{dates[0]}.npz").files) if (IV.BRONZE / f"{dates[0]}.npz").exists() else []
+    ghs = {p: e for p, e in ((p, IS.load_cached_epochs(p)) for p in ("popdens", "built_s")) if e}
+    static = _load_static() if with_static else {}
+    n_dyn = len(wkeys) + 1 + len(vkeys) + len(ghs)
+    log.info(f"assembling {len(dates)} days [{dates[0]}..{dates[-1]}] | {n_dyn} dynamic "
+             f"(weather {len(wkeys)} + fire + veg {len(vkeys)} + GHS {list(ghs)}) + {len(static)} static; "
+             f"chunked {chunk_days}d")
     comp = Blosc(cname="zstd", clevel=3, shuffle=Blosc.BITSHUFFLE)
-    enc = {v: {"compressor": comp, "chunks": (1, grid.NY, grid.NX) if "time" in ds[v].dims
-               else (grid.NY, grid.NX)} for v in ds.data_vars}
     out = Path(out)
     if out.exists():
-        import shutil; shutil.rmtree(out)
-    ds.to_zarr(str(out), mode="w", zarr_format=2, encoding=enc, consolidated=True)
-    log.info(f"wrote {out}  ({len(ds.data_vars)} vars: {len(dyn)} dynamic + "
-             f"{len(ds.data_vars)-len(dyn)} static, {len(dates)} days)")
+        shutil.rmtree(out)
+    for ci, c0 in enumerate(range(0, len(dates), chunk_days)):
+        cdates = dates[c0:c0 + chunk_days]
+        dyn = _dyn_chunk(cdates, wkeys, vkeys, ghs)
+        ds = xr.Dataset({k: (("time", "y", "x"), v) for k, v in dyn.items()},
+                        coords={"time": pd.to_datetime(cdates), "y": gy, "x": gx})
+        if ci == 0:                                       # first write: + static + encoding + attrs
+            for k, v in static.items():
+                ds[k] = (("y", "x"), v)
+            ds.attrs.update(title="Fire Guard Datacube (silver, 1 km)", crs="EPSG:3035",
+                            dynamic_source="Open-Meteo ERA5 + FIRMS VIIRS + MODIS/MPC veg + GHS-POP/BUILT",
+                            static_source="inherited from IberFire v1 (refined ×4, lossless at 4 km gold)")
+            enc = {v: {"compressor": comp, "chunks": (1, grid.NY, grid.NX) if "time" in ds[v].dims
+                       else (grid.NY, grid.NX)} for v in ds.data_vars}
+            ds.to_zarr(str(out), mode="w", zarr_format=2, encoding=enc, consolidated=False)
+        else:
+            ds.to_zarr(str(out), append_dim="time", consolidated=False)
+        log.info(f"  chunk {cdates[0]}..{cdates[-1]} ({len(cdates)}d) written")
+    zarr.consolidate_metadata(str(out))
+    log.info(f"wrote {out}  ({n_dyn} dynamic + {len(static)} static, {len(dates)} days, chunked)")
     return out
 
 

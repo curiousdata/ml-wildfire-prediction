@@ -37,6 +37,22 @@ model, same metric. Reproduce with `scripts/fgdc_ablation.py` (`--groups` for le
 
 ---
 
+### 2026-06-10 (update) — Multi-month re-run (Jan–Jul 2015, 184 days, all feeds)
+First multi-month run (vs the 31-day slice): fire + GHS-POP/BUILT + 2015 weather/veg, chunked-built cube.
+- **Horizon:** AP 0.150 (1d) → **0.257 (3d)** → 0.253 (7d); ROC 0.919 → 0.883 → 0.854. **AP peaks at 3d then
+  plateaus**, ROC monotonically falls → multi-horizon win holds, but **~3d is the sweet spot**, not "longer
+  is better." (Next-day AP also rose 0.026→0.150 vs the slice — more data + GHS + veg lift base skill.)
+- **Leave-one-group-out (3d, full AP 0.257):** human **+0.070** (dominant, ↑ from slice's +0.030), terrain
+  **+0.022**, fuel_cover −0.003, fire_context −0.010, soil −0.011, weather −0.011, **vegetation −0.033**.
+- **Verdict:** human-features dominance is now robust; terrain confirmed; **GHS-POP/BUILT investment
+  validated**. **⚠️ Seasonal caveat:** this window is mostly LOW fire season (Jan–Jul) — veg (green spring,
+  non-discriminative) and weather (no summer drought/heat signal) show *negative* ΔAP, which is a
+  **window artifact, NOT a reason to drop them**. They must be re-judged on **summer-inclusive** data (veg
+  backfill is filling toward summer 2015 now). The slice/H1 entries below are superseded by this for the
+  group numbers; all get a final re-run on the full multi-year backfill.
+- **Scale note:** validated `build_silver`'s new INCREMENTAL chunked write — 184 days built with bounded
+  memory (the old all-in-RAM path would need ~22 GB).
+
 ### 2026-06-10 — Target horizon: next-1d vs within-3d vs within-7d
 - **Idea:** predict "fire within N days" (forward rolling-OR of the daily VIIRS label) instead of only t+1.
 - **What it solves:** next-day ignition is the sparsest, most *stochastic* target (exact ignition day ≈ noise);
