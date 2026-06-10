@@ -39,6 +39,13 @@ MULTI-YEAR span** (population barely moves within one month) → queued for the 
 Next P3: wire GHS-POP into build_silver (replace v1's stale popdens), add GHS-BUILT-S as an ablation
 candidate, inherit CORINE/OSM/Natura2000 from v1, compute calendar.
 
+**Sample backfill (2015–2018) — operational finding: Open-Meteo quota.** Fire (1461 days ✓) + GHS-POP/BUILT
+(✓) done; veg running. **Weather hit a 429 rate-limit at ~120 days** — not volume (a 4 yr backfill is only
+~250–700 requests) but the free-tier daily/hourly quota was already spent by the day's many validate/dev
+runs. Mitigations: `backfill_range` chunk default 30→60 days (fewer, larger range requests); the backfill is
+resumable (skips existing days) so it's re-run when quota refreshes. Strategy note: the eventual full
+2012→present weather pull should run once on a fresh quota (or the scheduled engine accumulates it forward).
+
 ### Bugs found & fixed
 - **MODIS QA fill contamination** *(found → fixed)*. MOD15A2H fill DN (249–255) survived scaling → FAPAR 1.20
   (>1!), LAI 10.2. Fixed by masking each product to its valid DN range before scaling → FAPAR ≤1, LAI ≤7.

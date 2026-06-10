@@ -88,10 +88,14 @@ def write_day(date):
     return out
 
 
-def backfill_range(start, end, chunk_days=30, step=FETCH_STEP):
+def backfill_range(start, end, chunk_days=60, step=FETCH_STEP):
     """Efficient backfill: Open-Meteo serves a whole date RANGE in one request per coord-batch, so we fetch
     the hourly+daily stack in chunk_days windows (one fetch per chunk, not per day), then aggregate+regrid
-    +write each day. ~chunk_days× fewer requests than per-day. Resumable (skips days whose npz exists)."""
+    +write each day. ~chunk_days× fewer requests than per-day. Resumable (skips days whose npz exists).
+
+    NOTE — Open-Meteo free tier is QUOTA-LIMITED (per-minute/hour/day). Large multi-year backfills must run
+    on a fresh quota; dev validate runs consume it. Bigger chunk_days = fewer requests = friendlier. If 429s
+    persist (daily cap), just re-run later — it resumes from the first missing day."""
     import logging
     log = logging.getLogger("ingest_weather")
     BRONZE.mkdir(parents=True, exist_ok=True)
