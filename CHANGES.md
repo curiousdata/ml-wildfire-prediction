@@ -10,6 +10,28 @@ current dated entry — what was wrong, its impact, and the fix (or that it's fl
 
 ---
 
+## 2026-06-11 — Optuna-tuned the production GBT (Track A); roadmap revisited into two tracks
+
+**Roadmap revisit.** ROADMAP.md was still framed around the v1 cube + U-Net era and named neither the live
+monitor nor the FGDC rebuild. Prepended a 2026-06-11 section that reconciles the project's **two tracks** —
+Track A (v1 GBT + Fire Guard control center, live & improvable today) and Track B (FGDC, the root-cause
+train=serve fix, **paused on the Open-Meteo free-tier quota**) — and re-prioritized the near-term work to
+what's API-free or makes the eventual backfill cheaper (light weather-fetch, Optuna, finish veg backfill).
+
+**Optuna tuning of the production GBT (`scripts/tune_gbt.py`).** Searched the HistGBT hyperparameter space
+(40 TPE trials) against the headline operational metric — **new-ignition AP on VAL** — reusing the exact
+split/features/`collect_cells`/`regime_metrics` as `train_gbt.py`, with train + val-eval matrices
+materialized once so trials are just fit+predict. **TEST (2022–24) is touched-once** — evaluated only by the
+final refit, never during search. Result: a uniformly-better-but-marginal config (test new-ign AP
+**0.633→0.639**, prec@K **0.453→0.463**, val new-ign AP **0.651→0.670**; every metric up on both splits).
+The winners favor **stronger regularization + feature bagging** (`min_samples_leaf` 112–254, `max_features`
+0.5–1.0, `l2` 2–9) over the under-regularized defaults (`min_samples_leaf=20, max_features=1.0, l2=1.0`).
+Top-5 trials sit on a **flat plateau** (209-leaf and 17-leaf configs score identically) → **the v1 model's
+ceiling is data/features, not hyperparameters** — the same finding that motivates Track B. **Promoted**:
+overwrote `gbt_coarse4.joblib`/`.meta.json` (git preserves the old), re-ran `calibrate_gbt.py` (ECE
+0.0044→0.0002, ranking preserved) + `gbt_importance.py` (drivers stable: `dist_to_fire`, `popdens`,
+`time_since_last_fire`). Full trial log: `reports/gbt_optuna.json`.
+
 ## 2026-06-08 — Fire Guard Datacube (FGDC): recollect the cube from operational, same-source providers
 
 **The strategic pivot behind the live track.** Every live-serving hack so far (persistence cascade, archive
