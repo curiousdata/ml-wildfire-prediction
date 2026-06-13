@@ -34,6 +34,7 @@ Thumbs.db
 data/IberFire_demo.csv
 data/IberFire_demo.parquet
 data/silver/*.zarr
+data/bronze/
 
 
 # MLFlow metadata and artifacts

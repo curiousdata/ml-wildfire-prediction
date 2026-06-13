@@ -32,6 +32,34 @@ overwrote `gbt_coarse4.joblib`/`.meta.json` (git preserves the old), re-ran `cal
 0.0044→0.0002, ranking preserved) + `gbt_importance.py` (drivers stable: `dist_to_fire`, `popdens`,
 `time_since_last_fire`). Full trial log: `reports/gbt_optuna.json`.
 
+**Live-serving backtest (`scripts/backtest_live.py`) — the honest "is the live feed accurate?" check.** Replays
+the live pipeline over in-cube fire-season days (seasonal warm-start from a *different* year + Open-Meteo
+weather/dryness + cube-truth fire via a new `fire_source="cube"` eval affordance in `live_slice.py`), scoring
+the live-assembled prediction vs the cube ceiling against true t+1 fire under the same regime. **Finding: the
+live-accuracy gap is the seasonal WARM-START, not the fire source.** With fire held at cube-truth, the
+live↔cube prediction correlation is still only ~0.12–0.16 and live new-ign AP roughly halves — the divergence
+is the warm-started *non-fire* features (vegetation, soil, and especially the fire-*history* features
+`time_since_last_fire`/`burn_frequency_365d`, borrowed from another year). Output: `reports/backtest_live.json`.
+
+**Open-Meteo archive disk cache (`scripts/fetch_openmeteo.py`).** `_get` now caches immutable ARCHIVE responses
+under `data/cache/openmeteo/` (forecast never cached) — fixes the free-tier 429 wall that blocks bulk
+backtesting (the 90-day antecedent fetch per day is the quota burner; 1/day in production is fine).
+
+**Full live weather family wired (`scripts/live_slice.py` `live_weather_full`, `weather="full"`).** Refreshes
+all 24 v1 weather features (RH/wind/pressure aggregates + derived VPD/HDW/EMC/FFWI) from Open-Meteo hourly,
+reusing `ingest_weather.daily_point_features` + v1's exact FE formulas, regridded to 4 km. Backtest shows
+weather refresh alone is **marginal** (corr 0.124→0.164) — weather is climatologically stable year-to-year, so
+warm-starting it ≈ truth; the lever is fire-history + vegetation, not weather. Default stays `weather="temp"`
+(production unchanged) until the gap-closing families land.
+
+**Deployed the Fire Guard control center to a public HF Space** (`space/`, **live at
+https://curiousdata-fireguard.hf.space**). A slim read-only Streamlit renderer adapted from
+`docker/monolith/app_live.py`: no zarr/torch/model at runtime — reads prediction grids + a precomputed
+`display_assets.npz` (CCAA grid + map georeferencing) + `gbt_coarse4.importance.json`. Seeded with a real
+prediction; `STORE` auto-switches to the mounted `fireguard-storage` bucket (`/data`) once a scheduled engine
+publishes there. Pushed via `hf upload` (SDK switched docker→streamlit). UI is live; auto-refresh engine +
+feed-quality (fire-history → veg) are the remaining work.
+
 ## 2026-06-08 — Fire Guard Datacube (FGDC): recollect the cube from operational, same-source providers
 
 **The strategic pivot behind the live track.** Every live-serving hack so far (persistence cascade, archive

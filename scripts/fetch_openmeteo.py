@@ -42,10 +42,30 @@ DAILY_MAP = {"temperature_2m_mean": "t2m_mean", "temperature_2m_max": "t2m_max",
              "wind_speed_10m_max": "wind_speed", "wind_direction_10m_dominant": "wind_direction"}
 
 
-def _get(url, params, tries=6, timeout=120):
+CACHE_DIR = Path(__file__).resolve().parents[1] / "data" / "cache" / "openmeteo"
+
+
+def _cache_path(url, params):
+    """Disk-cache key for a request. ARCHIVE responses are IMMUTABLE historical ERA5 (a past date's reanalysis
+    never changes), so caching them is correctness-safe AND it dodges the free-tier 429 wall on repeated
+    backfills/backtests. Forecast responses change daily → never cached (returns None)."""
+    if not url.startswith(ARCHIVE):
+        return None
+    import hashlib
+    import json
+    key = hashlib.sha1((url + json.dumps(params, sort_keys=True, default=str)).encode()).hexdigest()
+    return CACHE_DIR / f"{key}.json"
+
+
+def _get(url, params, tries=6, timeout=120, use_cache=True):
     """GET with backoff on 429/5xx AND on network timeouts/connection errors (hourly multi-var requests are
-    large and the free tier is flaky), honoring Retry-After."""
+    large and the free tier is flaky), honoring Retry-After. Archive responses are disk-cached (immutable →
+    repeated backtests/backfills cost no quota)."""
+    import json
     import requests
+    cp = _cache_path(url, params) if use_cache else None
+    if cp is not None and cp.exists():
+        return json.loads(cp.read_text())
     last_exc = None
     for i in range(tries):
         try:
@@ -57,7 +77,11 @@ def _get(url, params, tries=6, timeout=120):
             time.sleep(wait)
             continue
         r.raise_for_status()
-        return r.json()
+        js = r.json()
+        if cp is not None:
+            cp.parent.mkdir(parents=True, exist_ok=True)
+            cp.write_text(json.dumps(js))
+        return js
     if last_exc is not None:
         raise last_exc
     r.raise_for_status()

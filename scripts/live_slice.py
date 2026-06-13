@@ -33,10 +33,38 @@ import scripts.fetch_firms as FB
 import scripts.fetch_effis as EF
 import src.data.feature_engineering as FE
 from src.data.features import build_segmentation_features
+from src.data.ingest.ingest_weather import daily_point_features as _dpf, HOURLY_VARS as _HOURLY_VARS
 
 TEMP_MAP = {"temperature_2m_mean": "t2m_mean", "temperature_2m_max": "t2m_max", "temperature_2m_min": "t2m_min"}
 REGIME_KM = 6.0  # ignition (dist>6km) vs spread (<=6km); = regime_dist_cells 1.5 * 4km
 _ANNUAL_RAIN = {}  # cube precip climatology (mm/yr per pixel), for KBDI; cached
+
+# The v1 weather features daily_point_features emits that match the cube (drops its soil_* — v1 uses SWI).
+_V1_WEATHER = ("t2m_mean", "t2m_max", "t2m_min", "t2m_range",
+               "RH_mean", "RH_max", "RH_min", "RH_range",
+               "surface_pressure_mean", "surface_pressure_max", "surface_pressure_min", "surface_pressure_range",
+               "wind_speed_mean", "wind_speed_max", "wind_u_mean", "wind_v_mean",
+               "wind_u_atmaxspeed", "wind_v_atmaxspeed", "total_precipitation_mean")
+
+
+def live_weather_full(date, gx, gy, source="archive", step=0.5):
+    """Refresh the FULL v1 weather family (+ derived VPD/HDW/EMC/FFWI) from Open-Meteo hourly, regridded to
+    the cube grid. Reuses ingest_weather.daily_point_features (identical hourly→daily aggregation to the
+    FGDC, names already match v1) and the SAME feature_engineering formulas v1 itself uses (coarsen.py:185-187
+    for VPD/HDW; add_engineered_features.py:108-112 for EMC/FFWI). Returns {feature: physical grid[H,W]}.
+    Open-Meteo archive responses are disk-cached, so repeated backtests cost no quota."""
+    plon, plat, hv, times = OM.fetch_grid_hourly_range(date, date, _HOURLY_VARS, step=step, source=source,
+                                                       models="era5")
+    _, _, dly, _ = OM.fetch_grid_range(date, date, ["precipitation_sum"], step=step, source=source, models="era5")
+    pts = _dpf(hv, times, dly["precipitation_sum"][0], date)
+    out = {f: OM.regrid_to_cube(plon, plat, pts[f], gx, gy) for f in _V1_WEATHER}
+    out["VPD_mean"] = FE.vpd_kpa(out["t2m_mean"], out["RH_mean"])
+    out["VPD_peak"] = FE.vpd_kpa(out["t2m_max"], out["RH_min"])
+    out["HDW"] = FE.hdw_index(out["VPD_peak"], out["wind_speed_max"])
+    emc = FE.equilibrium_moisture_content(out["t2m_max"], out["RH_min"])
+    out["emc_peak"] = emc
+    out["ffwi"] = FE.fosberg_ffwi(emc, out["wind_speed_max"])
+    return out
 
 
 def _annual_rain(ds):
@@ -85,7 +113,7 @@ def live_antecedent_dryness(date, ds, gx, gy, source):
 
 
 def build_live_slice(date, feats, ds, stats, base_idx, source="archive", use_firms=True,
-                     use_antecedent=True, fire_source="effis"):
+                     use_antecedent=True, fire_source="effis", weather="temp"):
     """Return (Xn[C,H,W] normalized, regime[H,W], today_fire[H,W], refreshed:list)."""
     X, y, reg = ds[base_idx]
     Xn = X.numpy().copy(); C, H, W = Xn.shape
@@ -102,10 +130,17 @@ def build_live_slice(date, feats, ds, stats, base_idx, source="archive", use_fir
             Xn[fidx[cf]] = ((grid_phys - m) / (s or 1.0)).astype(Xn.dtype)
             refreshed.append(cf)
 
-    # --- Open-Meteo temperature (keyless, validated) ---
-    plon, plat, vals = OM.fetch_grid(date, list(TEMP_MAP), step=0.5, source=source)  # ~5 reqs (rate-limit-friendly)
-    for om, cf in TEMP_MAP.items():
-        overwrite(cf, OM.regrid_to_cube(plon, plat, vals[om], gx, gy))
+    # --- Open-Meteo weather ---
+    if weather == "full":
+        # full family (RH/wind/pressure/precip + derived VPD/HDW/EMC/FFWI) from hourly — shrinks the
+        # warm-start surface from ~52 dynamic features toward ~7 (only SWI/FWI/fire-history fall back).
+        for cf, g in live_weather_full(date, gx, gy, source=source).items():
+            overwrite(cf, g)
+        refreshed.append("weather:full")
+    else:                                          # "temp": validated minimal path (t2m only)
+        plon, plat, vals = OM.fetch_grid(date, list(TEMP_MAP), step=0.5, source=source)  # ~5 reqs
+        for om, cf in TEMP_MAP.items():
+            overwrite(cf, OM.regrid_to_cube(plon, plat, vals[om], gx, gy))
 
     # --- live antecedent dryness (precip_sum_7/30/90d, days_since_rain, kbdi) from a 90-day precip stack ---
     if use_antecedent:
@@ -152,6 +187,20 @@ def build_live_slice(date, feats, ds, stats, base_idx, source="archive", use_fir
             regime = np.where(land, 1, 0).astype(int)
             today_fire = no_fire
             refreshed.append("fire:none(no-live-or-cache)")
+
+    elif fire_source == "cube":
+        # EVAL/BACKTEST ONLY: inject the cube's historically-correct fire for the TARGET `date` (live EFFIS
+        # can't reproduce a past day's fire state). Lets a historical backtest replicate the real live
+        # pipeline — seasonal warm-start + Open-Meteo weather/dryness — while holding fire at the truth the
+        # model's EFFIS-trained fire features expect. NOT used in production (default fire_source="effis").
+        cfire = (ds.ds["is_fire"].sel(time=date).values > 0.5).astype(np.float32)
+        cd2f = ds.ds["dist_to_fire"].sel(time=date).values.astype(np.float32)
+        fill = float(cd2f[np.isfinite(cd2f)].max()) if np.isfinite(cd2f).any() else 0.0
+        overwrite("is_fire", cfire)
+        overwrite("dist_to_fire", np.where(np.isfinite(cd2f), cd2f, fill))
+        regime = np.where(~land, 0, np.where(cd2f > REGIME_KM, 1, 2)).astype(int)
+        today_fire = cfire
+        refreshed.append("fire:cube-truth(backtest)")
 
     # --- DISPLAY fire ← FIRMS (low-latency hotspots, for the MAP only; NOT fed to the model) ---
     if use_firms and os.getenv("FIRMS_MAP_KEY"):
