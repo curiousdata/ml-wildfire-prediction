@@ -1,0 +1,27 @@
+ML Wildfire Prediction — next-day wildfire-occurrence modelling for Spain
+Copyright 2025-2026 Vladimir Morozov
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+this work except in compliance with the License. A copy is in the LICENSE file.
+
+------------------------------------------------------------------------------
+Attribution (please retain when redistributing, per Apache-2.0 §4(d)).
+------------------------------------------------------------------------------
+
+This project is built on the IberFire datacube and MUST cite it in any
+derivative work, publication, or redistribution:
+
+  Erzibengoa, J., Gómez-Omella, M., & Goienetxea, I. (2025). IberFire — a
+  detailed creation of a spatio-temporal dataset for wildfire risk assessment
+  in Spain. arXiv:2505.00837. Dataset: https://zenodo.org/records/15225886
+
+If you use this repository (code, models, or derived data), please also cite it
+via the metadata in CITATION.cff.
+
+Underlying open data sources (cite as appropriate to your use):
+  - ERA5 / ERA5-Land reanalysis — Muñoz-Sabater et al. (2021), ESSD 13:4349;
+    accessed via Open-Meteo and the Copernicus Climate Data Store (ARCO-ERA5).
+  - VIIRS 375 m active fire (NASA FIRMS) — Schroeder et al. (2014), RSE.
+  - MODIS vegetation/LST — via Microsoft Planetary Computer.
+  - EFFIS burned area — Copernicus Emergency Management Service.
+  - CORINE Land Cover, GHS-POP/GHS-BUILT — Copernicus / EC JRC.
