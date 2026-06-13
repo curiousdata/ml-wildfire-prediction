@@ -51,6 +51,7 @@ models/resnet50_v1.pth
 models/resnext50_32x4d_v1.pth
 models/se_resnet50_v1.pth
 models/se_resnext50_32x4d_v1.pth
+
 # Experimental seg checkpoints stay local; LFS-track a keeper explicitly (cf. resnet34_v9.pth)
 models/*.pth
 CLAUDE.md
@@ -64,3 +65,6 @@ data/serving_store/
 
 # Agent runtime lock
 .claude/scheduled_tasks.lock
+
+# Cache
+data/cache/
