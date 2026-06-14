@@ -10,6 +10,40 @@ current dated entry — what was wrong, its impact, and the fix (or that it's fl
 
 ---
 
+## 2026-06-14 — FGDC adopts Lambda architecture (+ light weather backfill)
+
+**Architecture decision.** The FGDC (v2) data pipeline adopts **Lambda architecture** as its primary
+vocabulary — the speed-layer / batch-layer split — because a train/serve gap at the live edge is *inherent*
+(ERA5 reanalysis does not exist for "today"), so the question is how to *manage* it, not avoid it:
+
+- **Batch layer** — immutable, append-only **master dataset** of best-grade observations (EDH ERA5
+  *reanalysis*, finalized VIIRS, MODIS) → recomputes the **batch view** = the training cube (1 km → 4 km +
+  engineered). Cadence: **monthly** on reanalysis finalization. Training-grade. The 2012→present backfill is
+  this layer's one-time seed.
+- **Speed layer** — freshest-source trailing-edge slices (Open-Meteo *forecast* / FIRMS NRT) + live
+  predictions for the last ~7 days; transient (superseded once batch finalizes those dates). Cadence:
+  **daily**. Operational-grade.
+- **Serving layer** — the merged risk product the Space reads: `batch view if date ≤ watermark else speed
+  view`; watermark = last date the batch layer has finalized.
+
+One codepath: `reconcile(start, end, layer="batch"|"speed")` — **same feature transform + grid**, only the
+source *vintage* differs → daily HF job = speed, monthly EDH job = batch, Space = serving. On HF the layers
+map to: HF Dataset (store, git = lineage) · scheduled Jobs (engine) · the Space (UI). **Medallion
+(bronze/silver/gold) is retained as the within-batch refinement axis** (orthogonal to Lambda's latency axis).
+Physical paths are **adopt-forward** (not renamed mid-backfill). Discipline carried from v1's failure: the
+trailing-edge forecast-vs-reanalysis skew is small + bounded but **must be measured** on the overlap — v1's
+sin was an *unmeasured* gap (EFFIS-trained vs FIRMS-served, 0.10 corr), not a gap per se.
+
+**Light weather backfill (batch-layer seed).** Two optimizations made the multi-year ERA5 pull cheap enough
+to run: (1) `fetch_openmeteo.make_regridder` precomputes the source→cube interpolation once (barycentric +
+nearest-fill) — bit-exact vs per-call `griddata`, ~38× faster/field; (2) switched the weather source from the
+public ARCO Zarr (whole-globe chunks → ~3.7 TB for 13 yr) to **Earth Data Hub (DestinE)** ERA5, chunked for
+time analysis (4320 h × 64 × 64) → a Spain slice pulls ~GBs; store opened once, 6-month block reads aligned
+to the time-chunk, 16-worker fetch. EDH values match ARCO to ~3 decimals; ~25× faster/month. CDS time-series
+was evaluated and rejected (point-only — not viable for a gridded cube).
+
+---
+
 ## 2026-06-10 — FGDC P2 vegetation complete + ablation practice established
 
 **Vegetation (P2) done & validated, keyless.** `ingest_veg.py` pulls MODIS NDVI/EVI (13A1), LAI/FAPAR (15A2H),
