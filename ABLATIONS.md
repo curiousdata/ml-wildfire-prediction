@@ -37,6 +37,30 @@ model, same metric. Reproduce with `scripts/fgdc_ablation.py` (`--groups` for le
 
 ---
 
+### 2026-06-13 — Summer-2015 re-judgment (Jun–Sep, 122 days, ARCO ERA5 weather)
+**The test the Jan–Jul window couldn't do.** Weather sourced from the public **ARCO-ERA5 Zarr** (no CDS
+account; full hourly fidelity), + VIIRS fire + MODIS veg + GHS + v1 static → silver → coarsen → ablation.
+Full pipeline validated end-to-end on the new weather source (full AP 0.214, ROC 0.902, 6,481 pos / 3.7 M rows;
+drivers sane, human dominant).
+- **Horizon (full feats):** AP 0.133 (1d) → **0.214 (3d)** → 0.231 (7d); ROC 0.923 → 0.902 → 0.893. Multi-horizon
+  win holds; same shape as Jan–Jul.
+- **Leave-one-group-out (3d):** human **+0.066** (dominant), fuel_cover **+0.021**, terrain **+0.013**,
+  soil −0.006, weather −0.012, vegetation −0.013, fire_context −0.020.
+- **Verdict — the "low-season artifact" hypothesis is NOT supported.** Even in peak fire season, weather and
+  vegetation show flat-to-slightly-**negative** *marginal* ΔAP — same sign as Jan–Jul. So the earlier
+  explanation ("negative because it's winter") was too optimistic. **But this is still NOT a drop signal:**
+  (1) magnitudes are tiny (≤0.02 AP) on a single summer / single split — within noise; (2) leave-one-GROUP-out
+  measures *marginal* value, and weather/veg/soil/fire-context are heavily **cross-correlated** (drought shows
+  in weather AND soil AND veg-anomaly; `dist_to_fire` correlates with burn-history) → a tree recovers the
+  signal from the rest, so redundant groups score ~0 even when individually predictive; (3) the target is
+  **blended** over all cells (dominated by human-accessible WUI), which washes out weather's *conditional*
+  value on extreme-danger / spread-regime days (the v1 measurement-floor found weather+wind+proximity carry
+  the SPREAD regime). **fire_context −0.020** (dropping `dist_to_fire` raised AP) is surprising and flagged for
+  a closer look — likely redundancy with burn-history features under the within-3d target.
+- **Next (for a trustworthy verdict):** the **full multi-year backfill** (statistical power across many
+  seasons) + a **regime-split / new-ignition-restricted** ablation where weather & fire-context should show
+  their conditional value. No group dropped.
+
 ### 2026-06-10 (update) — Multi-month re-run (Jan–Jul 2015, 184 days, all feeds)
 First multi-month run (vs the 31-day slice): fire + GHS-POP/BUILT + 2015 weather/veg, chunked-built cube.
 - **Horizon:** AP 0.150 (1d) → **0.257 (3d)** → 0.253 (7d); ROC 0.919 → 0.883 → 0.854. **AP peaks at 3d then

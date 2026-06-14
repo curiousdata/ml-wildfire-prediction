@@ -167,6 +167,48 @@ def regrid_to_cube(plon, plat, vals, gx, gy, epsg=3035):
     return np.where(np.isfinite(lin), lin, nn).astype(np.float32)
 
 
+def make_regridder(plon, plat, gx, gy, epsg=3035):
+    """Precompute the source→cube interpolation ONCE and return a fast callable `f(vals) -> cube_grid`.
+
+    `regrid_to_cube` rebuilds the Delaunay triangulation AND a KD-tree on every call (twice — linear+nearest).
+    In a backfill the source point set (the fixed ERA5/Open-Meteo grid) and the target (the fixed 1 km cube
+    grid) are identical for every day × feature, so all that geometry is recomputed thousands of times for
+    nothing. Here we do it once: build the triangulation, locate every cube cell in its simplex, cache the
+    barycentric weights + vertex indices (linear interp) and the nearest-neighbour index (hull-edge fill).
+    Each subsequent regrid is then a gather + weighted-sum — O(cells), not O(triangulate). Turns the
+    per-feature cost from ~hundreds of ms into ~tens of ms.
+
+    Assumes the SAME finite source points for every call (true for ERA5 reanalysis over our box — no NaNs).
+    If a value vector contains NaN it transparently falls back to the scattered `regrid_to_cube`."""
+    from scipy.spatial import Delaunay, cKDTree
+    tx, ty = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg}", always_xy=True).transform(plon, plat)
+    src = np.column_stack([np.asarray(tx, float), np.asarray(ty, float)])
+    GX, GY = np.meshgrid(gx, gy)
+    shape = GX.shape
+    tgt = np.column_stack([GX.ravel(), GY.ravel()])
+    tri = Delaunay(src)
+    simplex = tri.find_simplex(tgt)
+    inside = simplex >= 0
+    T = tri.transform[simplex[inside]]                 # (n_in, 3, 2): [:, :2]=affine inv, [:, 2]=offset
+    d = tgt[inside] - T[:, 2]
+    bary = np.einsum("ijk,ik->ij", T[:, :2], d)        # first 2 barycentric coords
+    weights = np.column_stack([bary, 1.0 - bary.sum(axis=1)]).astype(np.float64)  # (n_in, 3)
+    verts = tri.simplices[simplex[inside]]             # (n_in, 3) → indices into src
+    nn_idx = cKDTree(src).query(tgt)[1]                # nearest source point per cube cell
+
+    def regrid(vals):
+        vals = np.asarray(vals, float)
+        if not np.isfinite(vals).all():
+            return regrid_to_cube(plon, plat, vals, gx, gy, epsg)   # robust fallback (rare for ERA5)
+        out = vals[nn_idx]                                          # nearest everywhere → hull-edge fill
+        out[inside] = np.einsum("ij,ij->i", vals[verts], weights)   # barycentric-linear inside the hull
+        return out.reshape(shape).astype(np.float32)
+
+    regrid.n_src = src.shape[0]
+    regrid.n_cells = tgt.shape[0]
+    return regrid
+
+
 def demo():
     import logging
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
