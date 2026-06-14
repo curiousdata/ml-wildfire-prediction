@@ -65,3 +65,5 @@ data/serving_store/
 # Agent runtime lock
 .claude/scheduled_tasks.lock
 .cdsapirc
+data/cache/
+data/bronze/fireguard/ghsl/
