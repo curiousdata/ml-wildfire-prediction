@@ -67,9 +67,10 @@ def _dyn_chunk(cdates, wkeys, vkeys, ghs, wregrid=None):
             dyn[k][i] = wregrid(w[k]) if wregrid is not None else w[k]
         dyn["is_fire"][i] = np.load(IF.BRONZE / f"{d}.npz")["is_fire"]
         if vkeys:
-            vv = np.load(IV.BRONZE / f"{d}.npz")
+            vp = IV.BRONZE / f"{d}.npz"
+            vv = np.load(vp) if vp.exists() else None         # missing veg day → NaN (GBT handles it natively)
             for k in vkeys:
-                dyn[k][i] = vv[k] if k in vv.files else np.nan
+                dyn[k][i] = vv[k] if (vv is not None and k in vv.files) else np.nan
     for p, epochs in ghs.items():                         # GHS interpolated per day
         arr = np.empty((len(cdates), grid.NY, grid.NX), np.float32)
         for i, d in enumerate(cdates):

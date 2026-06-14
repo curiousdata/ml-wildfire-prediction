@@ -54,34 +54,47 @@ def _group(name):
     return "other"
 
 
-def _build(z, horizon, dyn, stat):
+def _build(z, horizon, dyn, stat, neg_ratio=30, seed=0):
+    """Chronological 80/20 split built per-timestep. TRAIN negatives are subsampled to neg_ratio:1 (all
+    positives kept) so a multi-year cube doesn't materialize ~50M rows (which OOMs); VAL keeps FULL
+    prevalence so val AP stays honest and comparable to prior full-prevalence ABLATIONS entries.
+    Returns (Xtr, ytr, Xval, yval, names)."""
     isf = z["is_fire"].values; T, H, W = isf.shape
     land = (np.nan_to_num(z["is_spain"].values) > 0.5) if "is_spain" in z else np.ones((H, W), bool)
     Sblk = np.stack([z[v].values.astype(np.float32) for v in stat], -1) if stat else np.zeros((H, W, 0), np.float32)
     tmax = T - 1 - horizon
-    X, y = [], []
+    cut_day = int((tmax + 1) * 0.8)
+    rng = np.random.default_rng(seed)
+    Xtr, ytr, Xval, yval = [], [], [], []
     for t in range(tmax + 1):
         ft = isf[t] > 0.5
         d2f = (distance_transform_edt(~ft) * 4.0) if ft.any() else np.full((H, W), 1e3, np.float32)
         dyn_t = np.stack([z[v].isel(time=t).values.astype(np.float32) for v in dyn], -1)
         feat = np.concatenate([dyn_t, d2f[..., None], Sblk], -1)[land]
-        X.append(feat)
-        y.append((isf[t + 1:t + 1 + horizon] > 0.5).any(0).astype(np.int8)[land])
+        yt = (isf[t + 1:t + 1 + horizon] > 0.5).any(0).astype(np.int8)[land]
+        if t < cut_day:                              # TRAIN — keep all positives, subsample negatives
+            pos = np.where(yt == 1)[0]; neg = np.where(yt == 0)[0]
+            if neg.size > neg_ratio * pos.size:
+                neg = rng.choice(neg, neg_ratio * max(pos.size, 1), replace=False)
+            keep = np.concatenate([pos, neg])
+            Xtr.append(feat[keep]); ytr.append(yt[keep])
+        else:                                        # VAL — full prevalence (honest AP)
+            Xval.append(feat); yval.append(yt)
     names = dyn + ["dist_to_fire"] + stat
-    return np.concatenate(X), np.concatenate(y), names, (tmax + 1)
+    return (np.concatenate(Xtr), np.concatenate(ytr),
+            np.concatenate(Xval), np.concatenate(yval), names)
 
 
-def _fit_eval(X, y, n_pairs, cols=None):
-    Xc = X if cols is None else X[:, cols]
-    n_per = X.shape[0] // n_pairs; cut = int(n_pairs * 0.8) * n_per
+def _fit_eval(Xtr, ytr, Xval, yval, cols=None):
+    Xt = Xtr if cols is None else Xtr[:, cols]
+    Xv = Xval if cols is None else Xval[:, cols]
+    if yval.sum() == 0 or yval.min() == yval.max():
+        return None, None
     gbt = HistGradientBoostingClassifier(max_iter=200, learning_rate=0.06, max_leaf_nodes=63,
                                          l2_regularization=1.0, class_weight="balanced", random_state=0)
-    gbt.fit(Xc[:cut], y[:cut])
-    Xv, yv = Xc[cut:], y[cut:]
-    if yv.sum() == 0 or yv.min() == yv.max():
-        return None, None
+    gbt.fit(Xt, ytr)
     p = gbt.predict_proba(Xv)[:, 1]
-    return float(average_precision_score(yv, p)), float(roc_auc_score(yv, p))
+    return float(average_precision_score(yval, p)), float(roc_auc_score(yval, p))
 
 
 def main():
@@ -93,17 +106,19 @@ def main():
     horizon = int(a[a.index("--horizon") + 1]) if "--horizon" in a else 3
     z = xr.open_zarr(str(cube), consolidated=True)
     dyn = [v for v in DYN if v in z]; stat = [v for v in STAT if v in z]
-    X, y, names, n_pairs = _build(z, horizon, dyn, stat)
+    Xtr, ytr, Xval, yval, names = _build(z, horizon, dyn, stat)
     grp = np.array([_group(n) for n in names])
-    log.info(f"cube={Path(cube).name} horizon={horizon}d rows={X.shape[0]:,} feats={len(names)} pos={int(y.sum())}")
+    log.info(f"cube={Path(cube).name} horizon={horizon}d train_rows={Xtr.shape[0]:,} val_rows={Xval.shape[0]:,} "
+             f"feats={len(names)} pos_val={int(yval.sum())}")
 
-    out = {"cube": Path(cube).name, "horizon": horizon, "rows": int(X.shape[0]), "pos": int(y.sum())}
+    out = {"cube": Path(cube).name, "horizon": horizon, "train_rows": int(Xtr.shape[0]),
+           "val_rows": int(Xval.shape[0]), "pos_val": int(yval.sum())}
     if "--horizons" in a:
         rows = []
         for h in (1, 3, 7):
-            Xh, yh, _, nph = _build(z, h, dyn, stat)
-            ap, roc = _fit_eval(Xh, yh, nph)
-            rows.append((h, float(yh.mean()), ap, roc))
+            Xt2, yt2, Xv2, yv2, _ = _build(z, h, dyn, stat)
+            ap, roc = _fit_eval(Xt2, yt2, Xv2, yv2)
+            rows.append((h, float(yv2.mean()), ap, roc))
         out["horizons"] = rows
         print("\n### Target-horizon ablation (full features)\n")
         print("| target | pos-rate | val AP | val ROC-AUC |\n|---|---|---|---|")
@@ -111,12 +126,12 @@ def main():
             print(f"| within {h}d | {pr*100:.3f}% | {ap:.3f} | {roc:.3f} |")
 
     if "--groups" in a or "--horizons" not in a:
-        ap_full, roc_full = _fit_eval(X, y, n_pairs)
+        ap_full, roc_full = _fit_eval(Xtr, ytr, Xval, yval)
         groups = sorted(set(grp) - {"other"})
         res = []
         for g in groups:
             keep = np.where(grp != g)[0]
-            ap, roc = _fit_eval(X, y, n_pairs, cols=keep)
+            ap, roc = _fit_eval(Xtr, ytr, Xval, yval, cols=keep)
             res.append((g, int((grp == g).sum()), ap, roc, ap_full - (ap or 0), roc_full - (roc or 0)))
         res.sort(key=lambda r: -r[4])
         out["full"] = {"AP": ap_full, "ROC": roc_full}
