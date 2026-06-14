@@ -31,6 +31,7 @@ from src.data.ingest import ingest_weather as IW
 from src.data.ingest import ingest_fire as IF
 from src.data.ingest import ingest_veg as IV
 from src.data.ingest import ingest_static as IS
+import scripts.fetch_openmeteo as OM
 
 SILVER = grid.ROOT / "data" / "silver" / "FireGuard.zarr"
 
@@ -55,13 +56,15 @@ def _load_static(refine=True):
     return out
 
 
-def _dyn_chunk(cdates, wkeys, vkeys, ghs):
-    """Build the dynamic [time,y,x] arrays for a small set of dates (bounded memory)."""
+def _dyn_chunk(cdates, wkeys, vkeys, ghs, wregrid=None):
+    """Build the dynamic [time,y,x] arrays for a small set of dates (bounded memory). Weather bronze is
+    stored at native ~0.25°; `wregrid` (OM.make_regridder) upsamples each native vector to the 1 km grid
+    on read. (Legacy 1 km bronze, where each value is already a grid, passes through when wregrid is None.)"""
     dyn = {k: np.empty((len(cdates), grid.NY, grid.NX), np.float32) for k in wkeys + ["is_fire"] + vkeys}
     for i, d in enumerate(cdates):
         w = np.load(IW.BRONZE / f"{d}.npz")
         for k in wkeys:
-            dyn[k][i] = w[k]
+            dyn[k][i] = wregrid(w[k]) if wregrid is not None else w[k]
         dyn["is_fire"][i] = np.load(IF.BRONZE / f"{d}.npz")["is_fire"]
         if vkeys:
             vv = np.load(IV.BRONZE / f"{d}.npz")
@@ -89,21 +92,23 @@ def build(start, end, out=SILVER, with_static=True, chunk_days=20):
     if not dates:
         raise SystemExit(f"no bronze days with both weather+fire in [{start},{end}] — run the ingesters first")
     gx, gy = grid.x_coords(), grid.y_coords()
-    wkeys = list(np.load(IW.BRONZE / f"{dates[0]}.npz").files)
+    w0 = np.load(IW.BRONZE / f"{dates[0]}.npz")
+    wkeys = [k for k in w0.files if k not in (IW.WLON, IW.WLAT)]      # feature keys only (drop coord arrays)
+    wregrid = OM.make_regridder(w0[IW.WLON], w0[IW.WLAT], gx, gy) if IW.WLON in w0.files else None  # native→1km
     vkeys = list(np.load(IV.BRONZE / f"{dates[0]}.npz").files) if (IV.BRONZE / f"{dates[0]}.npz").exists() else []
     ghs = {p: e for p, e in ((p, IS.load_cached_epochs(p)) for p in ("popdens", "built_s")) if e}
     static = _load_static() if with_static else {}
     n_dyn = len(wkeys) + 1 + len(vkeys) + len(ghs)
     log.info(f"assembling {len(dates)} days [{dates[0]}..{dates[-1]}] | {n_dyn} dynamic "
-             f"(weather {len(wkeys)} + fire + veg {len(vkeys)} + GHS {list(ghs)}) + {len(static)} static; "
-             f"chunked {chunk_days}d")
+             f"(weather {len(wkeys)}{' native→1km' if wregrid is not None else ''} + fire + veg {len(vkeys)} "
+             f"+ GHS {list(ghs)}) + {len(static)} static; chunked {chunk_days}d")
     comp = Blosc(cname="zstd", clevel=3, shuffle=Blosc.BITSHUFFLE)
     out = Path(out)
     if out.exists():
         shutil.rmtree(out)
     for ci, c0 in enumerate(range(0, len(dates), chunk_days)):
         cdates = dates[c0:c0 + chunk_days]
-        dyn = _dyn_chunk(cdates, wkeys, vkeys, ghs)
+        dyn = _dyn_chunk(cdates, wkeys, vkeys, ghs, wregrid)
         ds = xr.Dataset({k: (("time", "y", "x"), v) for k, v in dyn.items()},
                         coords={"time": pd.to_datetime(cdates), "y": gy, "x": gx})
         if ci == 0:                                       # first write: + static + encoding + attrs

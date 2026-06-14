@@ -165,10 +165,10 @@ def _var(ds, short):
     raise KeyError(f"ERA5 file has neither '{short}' nor '{long}'; vars present: {list(ds.data_vars)}")
 
 
-def _process_day(ds, tname, day, gx, gy, regrid=None):
-    """One day's 24 hourly ERA5 fields → regridded bronze feature dict (reusing daily_point_features).
-    `regrid` is a prebuilt `OM.make_regridder` callable (fixed source/target grids); falls back to the
-    scattered `OM.regrid_to_cube` if not supplied."""
+def _native_day(ds, tname, day):
+    """One day's 24 hourly ERA5 fields → native per-point bronze dict (reusing daily_point_features).
+    Returns the NATIVE per-point dict {feature: vec[n_pts], __lon__, __lat__} — NO regrid (build_silver
+    regrids to 1 km on read). Storing native keeps bronze ~200 KB/day vs ~71 MB/day upsampled to 1 km."""
     tdays = pd.to_datetime(ds[tname].values)
     sel = np.where(tdays.strftime("%Y-%m-%d") == day)[0]
     if sel.size != 24:
@@ -176,7 +176,6 @@ def _process_day(ds, tname, day, gx, gy, regrid=None):
     sub = ds.isel({tname: sel})
     lo = sub["longitude"].values.astype(float); la = sub["latitude"].values.astype(float)
     LO, LA = np.meshgrid(lo, la); plon, plat = LO.ravel(), LA.ravel()
-    rg = regrid or (lambda vec: OM.regrid_to_cube(plon, plat, vec, gx, gy))
 
     def hr(short):                               # [24, n_pts]
         return np.asarray(_var(sub, short).values, float).reshape(24, -1)
@@ -192,15 +191,18 @@ def _process_day(ds, tname, day, gx, gy, regrid=None):
     daily_precip_mm = hr("tp").sum(0) * 1000.0   # m → mm, daily sum (matches Open-Meteo precipitation_sum)
     times = [t.strftime("%Y-%m-%dT%H:%M") for t in tdays[sel]]
     feats = IW.daily_point_features(hv, times, daily_precip_mm, day)
-    return {k: rg(vec).astype(np.float32) for k, vec in feats.items()}
+    out = {k: np.asarray(vec, np.float32) for k, vec in feats.items()}
+    out[IW.WLON] = plon.astype(np.float64); out[IW.WLAT] = plat.astype(np.float64)
+    return out
 
 
-def _build_regridder(ds, gx, gy):
-    """Build the fixed-grid cached regridder from a dataset's lon/lat (identical across all days/months
-    for the static ERA5 grid) — done ONCE per backfill run, reused for every day × feature."""
-    lo = ds["longitude"].values.astype(float); la = ds["latitude"].values.astype(float)
-    LO, LA = np.meshgrid(lo, la)
-    return OM.make_regridder(LO.ravel(), LA.ravel(), gx, gy)
+def _qc_native(out):
+    """Light data-quality gate before an atomic write: every feature must carry some finite data (catches a
+    bad parse). Crash/ENOSPC truncation is handled separately by the atomic temp→rename write."""
+    bad = [k for k in out if not k.startswith("__") and not np.isfinite(out[k]).any()]
+    if bad:
+        raise ValueError(f"QC: all-non-finite features {bad}")
+    return out
 
 
 def _retrieve_month(year, month, target):
@@ -222,8 +224,6 @@ def backfill(start, end, overwrite=False, source="arco"):
     source='edh': Earth Data Hub Zarr (token, time-chunked → light regional pull — PREFERRED for multi-year).
     'arco': public ARCO Zarr (no auth, but whole-globe chunks → heavy). 'cds': CDS NetCDF (queued)."""
     IW.BRONZE.mkdir(parents=True, exist_ok=True)
-    gx, gy = grid.x_coords(), grid.y_coords()
-    regrid = None
     # EDH time-chunks are 4320 h (~6 months): read a whole chunk-span at once so each chunk downloads ONCE
     # (monthly reads would re-fetch the same 6-month chunk 6×). ARCO/CDS are time=1 / per-month → block=1.
     block_months = 6 if source == "edh" else 1
@@ -246,18 +246,14 @@ def backfill(start, end, overwrite=False, source="arco"):
         else:
             per = block[0]; nc = RAW / f"era5_{per.year}-{per.month:02d}.nc"
             _retrieve_month(per.year, per.month, nc); ds, tname = _open(nc)
-        if regrid is None:                                  # build the cached interpolator ONCE, reuse forever
-            regrid = _build_regridder(ds, gx, gy)
-            log.info(f"  cached regridder built: {regrid.n_src} ERA5 pts → {regrid.n_cells} cube cells "
-                     f"(reused for every day × feature)")
         nok = 0
         for d in todo:
             try:
-                np.savez_compressed(IW.BRONZE / f"{d}.npz", **_process_day(ds, tname, d, gx, gy, regrid)); nok += 1
+                IW.atomic_savez(IW.BRONZE / f"{d}.npz", **_qc_native(_native_day(ds, tname, d))); nok += 1
             except Exception as e:
                 log.warning(f"  {d}: parse failed ({type(e).__name__}: {e})")
         ds.close()
-        log.info(f"{tag}: wrote {nok}/{len(todo)} day(s) [{source}]")
+        log.info(f"{tag}: wrote {nok}/{len(todo)} day(s) native [{source}]")
 
 
 def probe(date="2015-08-01", source="arco"):
@@ -279,16 +275,17 @@ def probe(date="2015-08-01", source="arco"):
                 "data_format": "netcdf", "download_format": "unarchived"}, str(nc))
         ds, tname = _open(nc)
     log.info(f"[{source}] dims={dict(ds.sizes)} time_coord='{tname}' data_vars={list(ds.data_vars)}")
+    out = _qc_native(_native_day(ds, tname, date))                 # native per-point dict (what bronze stores)
     gx, gy = grid.x_coords(), grid.y_coords()
-    regrid = _build_regridder(ds, gx, gy)
-    log.info(f"  cached regridder: {regrid.n_src} ERA5 pts → {regrid.n_cells} cube cells")
-    out = _process_day(ds, tname, date, gx, gy, regrid)
+    regrid = OM.make_regridder(out[IW.WLON], out[IW.WLAT], gx, gy)  # the regrid build_silver does on read
+    log.info(f"  native pts={out[IW.WLON].size} → cube {regrid.n_cells} cells (regrid-on-read at silver build)")
+    grids = {k: regrid(v) for k, v in out.items() if not k.startswith("__")}
     for k in ("t2m_mean", "RH_mean", "RH_min", "surface_pressure_mean", "wind_speed_max",
               "wind_u_mean", "total_precipitation_mean", "soil_moisture_mean"):
-        if k in out:
-            v = out[k]; fin = np.isfinite(v)
+        if k in grids:
+            v = grids[k]; fin = np.isfinite(v)
             log.info(f"  {k:<24} finite%={fin.mean()*100:4.0f} range=[{np.nanmin(v):.3f},{np.nanmax(v):.3f}]")
-    log.info(f"probe OK — {len(out)} features on the {gx.size}x... grid; bronze-compatible with Open-Meteo path")
+    log.info(f"probe OK — {len(grids)} features; native bronze (~200 KB/day) + regrid-on-read validated")
 
 
 def main():
