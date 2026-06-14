@@ -68,9 +68,10 @@ def _target():
 
 
 def _client():
-    import planetary_computer as pc
+    # NB: do NOT sign at search time — SAS tokens expire in ~1 h and a slow multi-composite chunk reads
+    # tiles long after the search → 403. We sign each tile href FRESH right before reading (see _mosaic_reproject).
     import pystac_client
-    return pystac_client.Client.open(STAC_URL, modifier=pc.sign_inplace)
+    return pystac_client.Client.open(STAC_URL)
 
 
 def _search(cat, collection, start, end, tries=6):
@@ -105,9 +106,10 @@ def _mosaic_reproject(items, asset, vmin=None, vmax=None):
     blend in or survive scaling."""
     from concurrent.futures import ThreadPoolExecutor
     from rioxarray.merge import merge_arrays
+    import planetary_computer as pc
 
     def _one(it):
-        t = _read_tile(it.assets[asset].href)
+        t = _read_tile(pc.sign(it.assets[asset].href))   # fresh SAS token per read → no mid-chunk expiry 403
         if vmin is not None:
             t = t.where((t >= vmin) & (t <= vmax))   # fills/out-of-range → NaN
         return t.rio.write_nodata(np.nan)            # so reproject propagates NaN, not 0, to gaps
@@ -138,8 +140,10 @@ def build_range(start, end):
             for cd in comp_dates:
                 try:
                     arr = _mosaic_reproject(bycomp[cd], asset, vmin, vmax) * scale
-                except Exception as e:           # one bad/expired-URL composite must not abort the run
-                    log.warning(f"  skip {asset} composite {cd}: {type(e).__name__} {e}"); continue
+                except Exception as exc:         # one bad/expired-URL composite must not abort the run
+                    # NB: name it `exc`, NOT `e` — `except ... as e` is deleted at block end and `e` is the
+                    # end-date used by _search() on the next collection (that clobber was the prior crash).
+                    log.warning(f"  skip {asset} composite {cd}: {type(exc).__name__} {exc}"); continue
                 yr, doy = int(cd[1:5]), int(cd[5:8])
                 dts.append(_dt.date(yr, 1, 1) + _dt.timedelta(days=doy - 1)); stack.append(arr)
             if stack:

@@ -42,6 +42,22 @@ time analysis (4320 h × 64 × 64) → a Spain slice pulls ~GBs; store opened on
 to the time-chunk, 16-worker fetch. EDH values match ARCO to ~3 decimals; ~25× faster/month. CDS time-series
 was evaluated and rejected (point-only — not viable for a gridded cube).
 
+**Bugs found & fixed.**
+- **Weather bronze filled the disk (~370 GB) + non-atomic writes left corrupt partials.** The backfill stored
+  weather *upsampled to 1 km* (~71 MB/day, ~99.8% redundant interpolation from the ~2318 ERA5 points) and
+  hit ENOSPC at ~2021; ENOSPC mid-`savez` left truncated npz that skip-existing treated as done. **Fix:** store
+  native 0.25° per-point vectors + coords (~118 KB/day, ~600× smaller), regrid native→1 km on read in
+  `build_silver` (values bit-identical); `atomic_savez` (temp→rename, name ends `.npz`) + `_qc_native` gate so
+  a crash never leaves a "present" corrupt partition.
+- **Veg backfill crashed: `UnboundLocalError: 'e'`.** In `ingest_veg.build_range`, `except Exception as e:`
+  deletes `e` at block end (Python 3), but `e` was also the end-date passed to `_search()` on the next
+  collection → the first composite skip wiped the end-date and aborted the whole run. **Fix:** renamed the
+  exception var to `exc`.
+- **Veg MPC 403s (expired SAS signatures).** The client signed assets once at search time (`pc.sign_inplace`),
+  but slow multi-composite chunks read tiles >1 h later, after the token expired → HTTP 403. **Fix:** sign each
+  tile href FRESH right before reading (`pc.sign` in `_mosaic_reproject`); search no longer signs. Validated:
+  NDVI vs v1 corr 0.9909 on 2012-07-15.
+
 ---
 
 ## 2026-06-10 — FGDC P2 vegetation complete + ablation practice established
