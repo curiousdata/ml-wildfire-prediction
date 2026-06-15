@@ -32,7 +32,6 @@ from src.data.ingest import ingest_fire as IF
 from src.data.ingest import ingest_veg as IV
 from src.data.ingest import ingest_static as IS
 import scripts.fetch_openmeteo as OM
-from numcodecs.bitround import BitRound
 
 SILVER = grid.ROOT / "data" / "silver" / "FireGuard.zarr"
 
@@ -58,7 +57,7 @@ def _load_static(refine=True):
 
 def _is_continuous(var):
     """ Find continuous variables that carry a noisy enough signal to apply compression with BitRound. """
-    return var in ['is_fire'] or var.startswith('is_') or var.startswith('CLC_')
+    return not (var in ['is_fire'] or var.startswith('is_') or var.startswith('CLC_'))
  
 def _dyn_chunk(cdates, wkeys, vkeys, ghs, wregrid=None):
     """Build the dynamic [time,y,x] arrays for a small set of dates (bounded memory). Weather bronze is
@@ -90,7 +89,7 @@ def build(start, end, out=SILVER, with_static=True, chunk_days=20):
     import zarr
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     log = logging.getLogger("build_silver")
-    from numcodecs import Blosc
+    from numcodecs import Blosc, BitRound
 
     dates = [d for d in _dates_present() if start <= d <= end]
     if not dates:
