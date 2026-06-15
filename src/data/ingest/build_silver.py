@@ -55,7 +55,9 @@ def _load_static(refine=True):
             out[v] = grid.refine_to_1km(arr) if refine else arr
     return out
 
-
+def _is_continuous(var):
+    return var in ['is_fire'] or var.startswith('is_') or var.startswith('CLC_')
+ 
 def _dyn_chunk(cdates, wkeys, vkeys, ghs, wregrid=None):
     """Build the dynamic [time,y,x] arrays for a small set of dates (bounded memory). Weather bronze is
     stored at native ~0.25°; `wregrid` (OM.make_regridder) upsamples each native vector to the 1 km grid
@@ -77,7 +79,6 @@ def _dyn_chunk(cdates, wkeys, vkeys, ghs, wregrid=None):
             arr[i] = IS.interp_to_date(epochs, d)
         dyn[p] = arr
     return dyn
-
 
 def build(start, end, out=SILVER, with_static=True, chunk_days=20):
     """Assemble silver, writing INCREMENTALLY along time (chunk_days at a time) so memory stays bounded —
@@ -118,7 +119,9 @@ def build(start, end, out=SILVER, with_static=True, chunk_days=20):
             ds.attrs.update(title="Fire Guard Datacube (silver, 1 km)", crs="EPSG:3035",
                             dynamic_source="Open-Meteo ERA5 + FIRMS VIIRS + MODIS/MPC veg + GHS-POP/BUILT",
                             static_source="inherited from IberFire v1 (refined ×4, lossless at 4 km gold)")
-            enc = {v: {"compressor": comp, "chunks": (1, grid.NY, grid.NX) if "time" in ds[v].dims
+            enc = {v: {"compressor": comp, 
+                       "filters": [BitRound(keepbits=12)] if _is_continuous(v) else None,
+                       "chunks": (1, grid.NY, grid.NX) if "time" in ds[v].dims
                        else (grid.NY, grid.NX)} for v in ds.data_vars}
             ds.to_zarr(str(out), mode="w", zarr_format=2, encoding=enc, consolidated=False)
         else:
