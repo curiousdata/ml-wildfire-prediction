@@ -32,6 +32,7 @@ from src.data.ingest import ingest_fire as IF
 from src.data.ingest import ingest_veg as IV
 from src.data.ingest import ingest_static as IS
 import scripts.fetch_openmeteo as OM
+from numcodecs.bitround import BitRound
 
 SILVER = grid.ROOT / "data" / "silver" / "FireGuard.zarr"
 
@@ -56,6 +57,7 @@ def _load_static(refine=True):
     return out
 
 def _is_continuous(var):
+    """ Find continuous variables that carry a noisy enough signal to apply compression with BitRound. """
     return var in ['is_fire'] or var.startswith('is_') or var.startswith('CLC_')
  
 def _dyn_chunk(cdates, wkeys, vkeys, ghs, wregrid=None):
