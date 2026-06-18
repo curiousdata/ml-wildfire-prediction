@@ -22,9 +22,10 @@ model, same metric. Reproduce with `scripts/fgdc_ablation.py` (`--groups` for le
 > - **Verdict:** keep / drop / needs-more-data — and why.
 > - **Caveats.**
 
-> ⚠️ Current entries run on the **Aug-2016 dev slice** (31 days) — numbers are **directional**, meant to
-> establish method + sign of effect. Each will be **re-run on the full 2012→present backfill** for final
-> magnitudes before any production decision; this file is updated in place when that happens.
+> ✅ The **2026-06-18 FULL-SPAN entry** (2012→2026-05, 5265 days) is now the **authoritative** group/horizon
+> result. The earlier slice/summer entries below are kept as the *method-development* record (and to show how
+> the `fire_context` sign flipped once enough seasons were present) — but they are **superseded** for final
+> magnitudes by the full-span run.
 
 ---
 
@@ -32,10 +33,57 @@ model, same metric. Reproduce with `scripts/fgdc_ablation.py` (`--groups` for le
 - **Temporal interpolation of slow layers** (GHS-POP / built-up / CLC proportions: step-snap vs
   linear-interp between editions) — *to run when P3 lands; user-prioritized.* Hypothesis: removing Jan-1
   step discontinuities removes a calendar artifact the model can key on and better reflects gradual change.
-- **Re-run all entries below on the full 2012→present backfill** for final magnitudes (slice numbers are
-  directional only).
+- ~~Re-run all entries on the full 2012→present backfill~~ **DONE 2026-06-18** (see the full-span entry below).
+- **Regime-split / new-ignition-restricted ablation** (ignition vs spread @ 6 km) — the test that should expose
+  weather's conditional value the blended metric hides; gives the v1-comparable new-ign AP (bar ≈ 0.63).
+- **P4 engineered fire-weather** (precip_sum_90d drought-memory, VPD/HDW/FFWI/KBDI) — the real weather test;
+  raw daily weather scored ~0 marginal on the full span, as expected without the engineered memory.
 
 ---
+
+### 2026-06-18 — FULL-SPAN re-run (2012-01-01 → 2026-05-31, 5265 days) — the trustworthy verdict
+**The full-backfill re-run the slice/summer entries were waiting for.** All three feeds complete over 14.5
+years — EDH ERA5 weather (native 0.25°, regridded on read) + FIRMS VIIRS fire + MODIS/MPC veg → silver
+(BitRound-12 compressed, 150 GB) → 4 km gold (5265 days) → ablation. **Supersedes the slice/summer entries
+for the group magnitudes.**
+- **Method note (new):** TRAIN negatives subsampled to 30:1 (all positives kept) so the ~50 M+ rows don't OOM;
+  VAL kept at FULL prevalence → val AP stays comparable to the prior full-prevalence entries. Same HistGBT,
+  chronological 80/20, within-3d default. (train_rows 6.07 M, val_rows 32.77 M, val pos 35,754.)
+- **Horizon (full feats):** AP 0.150 (1d) → **0.169 (3d)** → 0.152 (7d); ROC 0.910 → 0.878 → 0.848. **3d is the
+  sweet spot**; on full data 1d is now competitive (vs the ~9× gap on the 31-day slice) and 7d falls off.
+- **Leave-one-group-out (3d, full AP 0.169, ROC 0.878):**
+
+  | dropped group | #feats | ΔAP |
+  |---|---|---|
+  | **fire_context** (dist_to_fire) | 1 | **+0.042** (dominant) |
+  | human (popdens, dist_to_roads, artificial) | 4 | **+0.020** |
+  | terrain (elevation, slope) | 2 | **+0.014** |
+  | fuel_cover (CLC forest/scrub) | 2 | +0.005 |
+  | weather (13 RAW: t2m/RH/pressure/wind/precip/soil) | 13 | +0.001 |
+  | soil_moisture | 2 | −0.003 |
+  | vegetation (NDVI/EVI/LAI/FAPAR/LST) | 5 | −0.005 |
+- **Verdict — `fire_context` is the dominant driver; its prior negative was a WINDOW ARTIFACT.** On the
+  single-window runs it scored NEGATIVE (−0.020 summer, −0.005 slice) and was flagged "surprising, needs a
+  closer look." On 14.5 years it is **+0.042, the #1 group** — recency/proximity of fire is the strongest
+  signal once enough seasons are present. Artifact confirmed and resolved. **human (+0.020) and terrain
+  (+0.014) robustly confirmed**; fuel_cover modest-positive.
+- **Weather & vegetation are still ~0 marginal even on full multi-year/multi-season data — but this is NOT a
+  drop signal**, for two specific reasons:
+  1. **RAW weather only.** The 13 weather vars are raw daily aggregates — NOT the ENGINEERED fire-weather that
+     carried weather in v1 (`precip_sum_90d` drought-memory was v1's *top* weather driver; VPD/HDW/FFWI/KBDI).
+     Those are **P4**, absent from this cube. So "raw weather +0.001 marginal" is *expected*; the real weather
+     test is the engineered drought/fire-weather memory.
+  2. **Blended target.** Leave-one-GROUP-out measures *marginal* value, and within-3d blends ignition + spread.
+     Weather's conditional value is on the spread/extreme-danger regime, washed out in the blend (and weather
+     is cross-correlated with fire_context/soil/veg → a tree recovers it). The **regime-split** is the test that
+     should expose it.
+- **Next (the two tests that close the weather verdict):** (1) **regime-split** (ignition vs spread, 6 km
+  threshold = v1's `regime_dist_cells=1.5`) at matched prevalence → v1-comparable new-ign AP (bar ≈ 0.63);
+  (2) **P4 engineered features** — does drought-memory / fire-weather earn its keep as in v1. **No group dropped.**
+- **Caveat:** absolute AP (0.169) is below the summer-2015 slice (0.214) because the full span averages in many
+  low-fire winters (pos-rate 0.109% vs the summer slice's higher rate); full-prevalence AP is prevalence-
+  sensitive, so **ROC 0.878 (prevalence-independent) is the honest cross-entry comparison**. Artifact JSON:
+  `reports/fgdc_ablation_full.json`.
 
 ### 2026-06-13 — Summer-2015 re-judgment (Jun–Sep, 122 days, ARCO ERA5 weather)
 **The test the Jan–Jul window couldn't do.** Weather sourced from the public **ARCO-ERA5 Zarr** (no CDS
