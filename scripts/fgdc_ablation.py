@@ -98,6 +98,18 @@ def _fit_eval(Xtr, ytr, Xval, yval, cols=None, return_pred=False):
     ap, roc = average_precision_score(yval, p), roc_auc_score(yval, p)
     return (ap, roc, p) if return_pred else (ap, roc)
 
+def _regime_eval(prob, yval, regval, neg_ratio=15, seed=0):
+    rng = np.random.default_rng(seed); neg_p = prob[yval==0]
+    def matched_ap(mask):
+        k = min(neg_p.size, neg_ratio * int(mask.sum()))
+        sel = rng.choice(neg_p.size, k, replace=False
+                         )
+        return average_precision_score(np.r_[np.ones(int(mask.sum())), np.zeros(k)], np.r_[prob[mask], neg_p[sel]])
+    return {"new_ign_ap": matched_ap((yval==1) & (regval==1)),
+            "spread_ap": matched_ap((yval==1) & (regval==2)),
+            "roc": roc_auc_score(yval, prob)
+            }
+
 def main():
     import logging
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -105,6 +117,8 @@ def main():
     a = sys.argv
     cube = a[a.index("--cube") + 1] if "--cube" in a else GOLD
     horizon = int(a[a.index("--horizon") + 1]) if "--horizon" in a else 3
+    regime = "--regime" in a
+
     z = xr.open_zarr(str(cube), consolidated=True)
     dyn = [v for v in DYN if v in z]; stat = [v for v in STAT if v in z]
     Xtr, ytr, Xval, yval, regval, names = _build(z, horizon, dyn, stat)
@@ -143,6 +157,14 @@ def main():
         for g, n, ap, roc, dap, droc in res:
             print(f"| {g} | {n} | {ap:.3f} | **{dap:+.3f}** | {roc:.3f} | {droc:+.3f} |")
         print("\n(ΔAP = full − without; larger positive = the group contributes more.)")
+
+    if regime:
+        _, _, prob = _fit_eval(Xtr, ytr, Xval, yval, return_pred=True)
+        r = _regime_eval(prob, yval, regval)
+        print(f"\n### Regime split (held-out val, matched prevalence)\n"
+          f"new-ignition AP = {r['new_ign_ap']:.3f}  (v1 bar ≈ 0.63)\n"
+          f"spread AP       = {r['spread_ap']:.3f}\n"
+          f"ROC             = {r['roc']:.3f}")
 
     if "--json" in a:
         Path(a[a.index("--json") + 1]).write_text(json.dumps(out, indent=2))
