@@ -86,7 +86,7 @@ def _build(z, horizon, dyn, stat, neg_ratio=30, seed=0):
             np.concatenate(Xval), np.concatenate(yval), np.concatenate(regval), names)
 
 
-def _fit_eval(Xtr, ytr, Xval, yval, cols=None):
+def _fit_eval(Xtr, ytr, Xval, yval, cols=None, return_pred=False):
     Xt = Xtr if cols is None else Xtr[:, cols]
     Xv = Xval if cols is None else Xval[:, cols]
     if yval.sum() == 0 or yval.min() == yval.max():
@@ -95,8 +95,8 @@ def _fit_eval(Xtr, ytr, Xval, yval, cols=None):
                                          l2_regularization=1.0, class_weight="balanced", random_state=0)
     gbt.fit(Xt, ytr)
     p = gbt.predict_proba(Xv)[:, 1]
-    return float(average_precision_score(yval, p)), float(roc_auc_score(yval, p))
-
+    ap, roc = average_precision_score(yval, p), roc_auc_score(yval, p)
+    return (ap, roc, p) if return_pred else (ap, roc)
 
 def main():
     import logging
