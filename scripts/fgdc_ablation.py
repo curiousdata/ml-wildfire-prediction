@@ -65,7 +65,7 @@ def _build(z, horizon, dyn, stat, neg_ratio=30, seed=0):
     tmax = T - 1 - horizon
     cut_day = int((tmax + 1) * 0.8)
     rng = np.random.default_rng(seed)
-    Xtr, ytr, Xval, yval = [], [], [], []
+    Xtr, ytr, Xval, yval, regval = [], [], [], [], []
     for t in range(tmax + 1):
         ft = isf[t] > 0.5
         d2f = (distance_transform_edt(~ft) * 4.0) if ft.any() else np.full((H, W), 1e3, np.float32)
@@ -80,9 +80,10 @@ def _build(z, horizon, dyn, stat, neg_ratio=30, seed=0):
             Xtr.append(feat[keep]); ytr.append(yt[keep])
         else:                                        # VAL — full prevalence (honest AP)
             Xval.append(feat); yval.append(yt)
+            regval.append(np.where(d2f[land] < 6.0, 2, 1).astype(np.int8))  # 1=far, 2=near fire
     names = dyn + ["dist_to_fire"] + stat
     return (np.concatenate(Xtr), np.concatenate(ytr),
-            np.concatenate(Xval), np.concatenate(yval), names)
+            np.concatenate(Xval), np.concatenate(yval), np.concatenate(regval), names)
 
 
 def _fit_eval(Xtr, ytr, Xval, yval, cols=None):
@@ -106,7 +107,7 @@ def main():
     horizon = int(a[a.index("--horizon") + 1]) if "--horizon" in a else 3
     z = xr.open_zarr(str(cube), consolidated=True)
     dyn = [v for v in DYN if v in z]; stat = [v for v in STAT if v in z]
-    Xtr, ytr, Xval, yval, names = _build(z, horizon, dyn, stat)
+    Xtr, ytr, Xval, yval, regval, names = _build(z, horizon, dyn, stat)
     grp = np.array([_group(n) for n in names])
     log.info(f"cube={Path(cube).name} horizon={horizon}d train_rows={Xtr.shape[0]:,} val_rows={Xval.shape[0]:,} "
              f"feats={len(names)} pos_val={int(yval.sum())}")
@@ -116,7 +117,7 @@ def main():
     if "--horizons" in a:
         rows = []
         for h in (1, 3, 7):
-            Xt2, yt2, Xv2, yv2, _ = _build(z, h, dyn, stat)
+            Xt2, yt2, Xv2, yv2, _, _ = _build(z, h, dyn, stat)
             ap, roc = _fit_eval(Xt2, yt2, Xv2, yv2)
             rows.append((h, float(yv2.mean()), ap, roc))
         out["horizons"] = rows
