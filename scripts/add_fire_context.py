@@ -32,15 +32,18 @@ NEW_VARS = ("dist_to_fire", "fire_upwind_exposure")
 def main() -> None:
     ap = argparse.ArgumentParser(description="Append §E fire-context features to a coarse cube.")
     ap.add_argument("--factor", type=int, default=4)
+    ap.add_argument("--cube", type=str, default="IberFire", help="Name of the cube to append to (default: IberFire).")
     ap.add_argument("--overwrite", action="store_true", help="Re-append even if the vars already exist.")
     args = ap.parse_args()
 
-    path = project_root / "data" / "gold" / f"IberFire_coarse{args.factor}.zarr"
+    factor, cube, overwrite = args.factor, args.cube, args.overwrite
+    
+    path = project_root / "data" / "gold" / f"{cube}_coarse{factor}.zarr"
     if not path.exists():
         raise FileNotFoundError(path)
 
     c = xr.open_zarr(path, consolidated=True)
-    if any(v in c.data_vars for v in NEW_VARS) and not args.overwrite:
+    if any(v in c.data_vars for v in NEW_VARS) and not overwrite:
         raise SystemExit(f"{NEW_VARS} already present in {path}. Use --overwrite.")
 
     xc = c["x"].values.astype("float64")
