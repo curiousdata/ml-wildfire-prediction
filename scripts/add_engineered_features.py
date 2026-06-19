@@ -48,8 +48,13 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--factor", type=int, default=4)
     ap.add_argument("--overwrite", action="store_true")
+    ap.add_argument("--cube", type=str, default="IberFire", help="Name of the cube to append to (default: IberFire).")
+
     args = ap.parse_args()
-    path = project_root / "data" / "gold" / f"IberFire_coarse{args.factor}.zarr"
+    factor, cube, overwrite = args.factor, args.cube, args.overwrite
+
+    args = ap.parse_args()
+    path = project_root / "data" / "gold" / f"{cube}_coarse{factor}.zarr"
     c = xr.open_zarr(path, consolidated=True)
 
     coords = {"time": c["time"], "y": c["y"], "x": c["x"]}
@@ -60,7 +65,7 @@ def main() -> None:
     existing = set(c.data_vars)
 
     def append(name, dims, data, attrs=None):
-        if name in existing and not args.overwrite:
+        if name in existing and not overwrite:
             print(f"  skip {name} (exists; use --overwrite)"); return
         if name in existing:  # mode='a' won't replace an existing var -> delete it first
             import zarr
