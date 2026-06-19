@@ -25,6 +25,7 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import average_precision_score, roc_auc_score
 
 from src.data.ingest import grid
+import src.data.feature_engineering as FE
 
 GOLD = grid.ROOT / "data" / "gold" / "FireGuard_coarse4.zarr"
 DYN = ["t2m_mean", "t2m_max", "t2m_min", "t2m_range", "RH_mean", "RH_min", "RH_max",
@@ -39,8 +40,10 @@ STAT = ["elevation_mean", "slope_mean", "dist_to_roads_mean",
 def _group(name):
     if name in ("NDVI", "EVI", "LAI", "FAPAR", "LST"):
         return "vegetation"
-    if name == "dist_to_fire":
+    if name in ("dist_to_fire", "time_since_last_fire"):
         return "fire_context"
+    if name in ("VPD_peak", "HDW", "FFWI", "precip_sum_90d"):     # engineered fire-weather + drought memory
+        return "weather"
     if name.startswith(("t2m", "RH", "surface_pressure", "wind", "total_precip")):
         return "weather"
     if name.startswith("soil_"):
@@ -65,12 +68,25 @@ def _build(z, horizon, dyn, stat, neg_ratio=30, seed=0):
     tmax = T - 1 - horizon
     cut_day = int((tmax + 1) * 0.8)
     rng = np.random.default_rng(seed)
+    # P4 engineered features, computed INLINE (only days ≤ t → no leakage). Fire-weather is point-wise off
+    # dyn_t columns (cube units already °C/%/m·s⁻¹); precip_sum_90d is a rolling backward window kept in a
+    # tiny circular buffer; time_since_last_fire is a running per-cell counter (NaN until a cell first burns).
+    iT, iRH, iW, iP = (dyn.index(v) for v in ("t2m_max", "RH_min", "wind_speed_max", "total_precipitation_mean"))
+    WIN = 90
+    pbuf = np.zeros((WIN, H, W), np.float32); psum = np.zeros((H, W), np.float32)
+    tslf = np.full((H, W), np.nan, np.float32)
     Xtr, ytr, Xval, yval, regval = [], [], [], [], []
     for t in range(tmax + 1):
         ft = isf[t] > 0.5
         d2f = (distance_transform_edt(~ft) * 4.0) if ft.any() else np.full((H, W), 1e3, np.float32)
         dyn_t = np.stack([z[v].isel(time=t).values.astype(np.float32) for v in dyn], -1)
-        feat = np.concatenate([dyn_t, d2f[..., None], Sblk], -1)[land]
+        vpd = FE.vpd_kpa(dyn_t[..., iT], dyn_t[..., iRH])                 # point-wise fire-weather (peak)
+        hdw = FE.hdw_index(vpd, dyn_t[..., iW])
+        ffwi = FE.fosberg_ffwi(FE.equilibrium_moisture_content(dyn_t[..., iT], dyn_t[..., iRH]), dyn_t[..., iW])
+        slot = t % WIN; psum = psum - pbuf[slot] + dyn_t[..., iP]; pbuf[slot] = dyn_t[..., iP]   # rolling 90-day precip
+        tslf = np.where(ft, 0.0, tslf + 1.0)                              # days since last fire (fire on days ≤ t)
+        eng = np.stack([d2f, vpd, hdw, ffwi, psum, tslf], -1)
+        feat = np.concatenate([dyn_t, eng, Sblk], -1)[land]
         yt = (isf[t + 1:t + 1 + horizon] > 0.5).any(0).astype(np.int8)[land]
         if t < cut_day:                              # TRAIN — keep all positives, subsample negatives
             pos = np.where(yt == 1)[0]; neg = np.where(yt == 0)[0]
@@ -81,7 +97,7 @@ def _build(z, horizon, dyn, stat, neg_ratio=30, seed=0):
         else:                                        # VAL — full prevalence (honest AP)
             Xval.append(feat); yval.append(yt)
             regval.append(np.where(d2f[land] < 6.0, 2, 1).astype(np.int8))  # 1=far, 2=near fire
-    names = dyn + ["dist_to_fire"] + stat
+    names = dyn + ["dist_to_fire", "VPD_peak", "HDW", "FFWI", "precip_sum_90d", "time_since_last_fire"] + stat
     return (np.concatenate(Xtr), np.concatenate(ytr),
             np.concatenate(Xval), np.concatenate(yval), np.concatenate(regval), names)
 
