@@ -26,7 +26,8 @@ if str(project_root) not in sys.path:
 from src.data.feature_engineering import fire_distance_and_exposure
 
 COMPRESSOR = Blosc(cname="zstd", clevel=3, shuffle=2)
-NEW_VARS = ("dist_to_fire", "fire_upwind_exposure")
+NEW_VARS = ("dist_to_fire", "fire_upwind_exposure",
+            "precip_sum_7d", "precip_sum_30d", "precip_sum_90d", "precip_sum_180d", "precip_sum_365d")
 
 
 def main() -> None:
@@ -67,9 +68,28 @@ def main() -> None:
         if t % 1000 == 0:
             print(f"  {t}/{nt}")
 
+    precip = c["total_precipitation_mean"].values.copy()
+    precip_sum = np.cumsum(precip, axis=0, dtype="float64")
+
+    def _precip_sum_Nd(C: np.ndarray, N: int) -> np.ndarray:
+        out = C.copy()                           # C is ALREADY the cumsum (precip_sum) — don't cumsum again
+        out[N:] = C[N:] - C[:-N]                 # N-day window; shape stays (T,y,x); rows < N keep partial cumsum
+        return out.astype("float32")
+        
+    precip_sum_7d = _precip_sum_Nd(precip_sum, 7)
+    precip_sum_30d = _precip_sum_Nd(precip_sum, 30)
+    precip_sum_90d = _precip_sum_Nd(precip_sum, 90)
+    precip_sum_180d = _precip_sum_Nd(precip_sum, 180)
+    precip_sum_365d = _precip_sum_Nd(precip_sum, 365)
+
     ctx = xr.Dataset(
         {"dist_to_fire": (("time", "y", "x"), dist),
-         "fire_upwind_exposure": (("time", "y", "x"), expo)},
+         "fire_upwind_exposure": (("time", "y", "x"), expo),
+         "precip_sum_7d": (("time", "y", "x"), precip_sum_7d),
+         "precip_sum_30d": (("time", "y", "x"), precip_sum_30d),
+         "precip_sum_90d": (("time", "y", "x"), precip_sum_90d),
+         "precip_sum_180d": (("time", "y", "x"), precip_sum_180d),
+         "precip_sum_365d": (("time", "y", "x"), precip_sum_365d)},
         coords={"time": c["time"], "y": c["y"], "x": c["x"]},
     )
     ctx["dist_to_fire"].attrs = {"units": "km", "description": "Distance to nearest fire cell on day t (0 on fire cells)."}
