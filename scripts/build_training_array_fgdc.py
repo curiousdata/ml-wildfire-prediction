@@ -1,6 +1,11 @@
+"""Pre-stack the FGDC cube's DYNAMIC features into one chunk per day for fast training reads.
+
+Output: data/gold/<cube>_coarse<F>_dyn.zarr  — dyn(time, channel, y, x) float16, RAW (not normalized;
+HistGBT splits on raw values), chunks (1, C, y, x), lz4. `channel` = the dynamic FGDC_FEATURE_VARS in
+frozen order (the trainer maps columns by this). Statics aren't stored — the trainer RAM-caches them.
+Derived artifact (no new info); rebuild when the feature set changes. ~30 min, one-time.
 """
-Builds a training array for the FGDC cube and HistGBT.
-"""
+
 from __future__ import annotations
 
 import argparse
@@ -50,7 +55,7 @@ def main() -> None:
     # build the training array in blocks of time
     time_coord = zarr_opened["time"]
     is_first_block = True
-    
+
     for t0 in range(0, time_size, args.block):
         t1 = min(t0 + args.block, time_size)
         block_array = np.empty((t1 - t0, dynamic_channel_size, height_size, width_size), dtype="float16")
