@@ -34,10 +34,14 @@ model, same metric. Reproduce with `scripts/fgdc_ablation.py` (`--groups` for le
   linear-interp between editions) — *to run when P3 lands; user-prioritized.* Hypothesis: removing Jan-1
   step discontinuities removes a calendar artifact the model can key on and better reflects gradual change.
 - ~~Re-run all entries on the full 2012→present backfill~~ **DONE 2026-06-18** (see the full-span entry below).
-- **Regime-split / new-ignition-restricted ablation** (ignition vs spread @ 6 km) — the test that should expose
-  weather's conditional value the blended metric hides; gives the v1-comparable new-ign AP (bar ≈ 0.63).
-- **P4 engineered fire-weather** (precip_sum_90d drought-memory, VPD/HDW/FFWI/KBDI) — the real weather test;
-  raw daily weather scored ~0 marginal on the full span, as expected without the engineered memory.
+- ~~Regime-split / new-ignition-restricted ablation~~ **DONE** (full-span entry 2026-06-18): RAW features →
+  new-ign AP **0.483**, spread **0.968**. Confirmed the blended metric was hiding the hard ignition regime.
+- ~~P4 engineered fire-weather~~ **DONE** — materialized into the cube; **new-ign 0.483 → 0.547 (inline P4-A)
+  → 0.622 (production model, 135-feature `features_fireguard`)**, spread 0.984. **FGDC matches v1's ~0.63 bar.**
+  Lift concentrated in `time_since_last_fire`; engineered drought/fire-weather is real but cross-correlated
+  with fire-memory (recoverable in leave-one-group-out). See CHANGES.md 2026-06-21.
+- **Still open** (next phase): t+1 forecast features (does tomorrow's-weather beat t-only? — needs
+  hindcast-archive training); CLC multi-edition + temporal interpolation (P3); external benchmark vs EFFIS/FWI.
 
 ---
 

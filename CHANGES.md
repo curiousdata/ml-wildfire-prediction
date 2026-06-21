@@ -10,6 +10,58 @@ current dated entry — what was wrong, its impact, and the fix (or that it's fl
 
 ---
 
+## 2026-06-21 — FGDC v2 baseline complete: full cube → engineered features → model MATCHES v1 (the A/B)
+
+Headline: the from-scratch operational-source rebuild now has a trained production model that **matches
+IberFire v1 on next-day new-ignition skill — on operational, self-sourced feeds with zero train/serve gap.**
+
+**Full backfill + cube.** All three dynamic feeds complete over 2012-01-01→2026-05-31 (5265 days): weather
+(EDH ERA5 reanalysis, native 0.25° stored + regridded on read), fire (FIRMS VIIRS), veg (MODIS/MPC). Built
+silver (BitRound-12, 150 GB) → 4 km gold (5265 days). Full-span ablation (ABLATIONS.md 2026-06-18):
+**fire_context dominant (+0.042)** — its earlier negative was a single-window artifact; human/terrain
+confirmed; raw weather ~0 marginal (the engineered-weather + regime tests resolved that, below).
+
+**P4 engineered features materialized.** `add_fire_context.py` (+ multi-scale `precip_sum_{7,30,90,180,365}d`
+rolling windows via a cumsum-diff) and `add_engineered_features.py` (kbdi, spi_90d, ndvi/lai anomalies, ffwi,
+time_since_last_fire, burn_frequency_365d) run on the FGDC gold (both now `--cube`-parametrized) → 266 vars.
+P4-A inline ablation: the engineered ignition features lift new-ign AP **0.483 → 0.547**, with
+**`time_since_last_fire` the single biggest driver** (engineered weather is real but largely redundant with
+fire-memory).
+
+**P5 — feature set + production model + the IberFire A/B.**
+- `src/data/features_fireguard.py` — the frozen, leak-free, fixed-order **135-feature** contract (excludes the
+  `is_fire` label, masks, region id, and stale CLC 2006/2012 editions; the v1 `features.py` analog).
+- `scripts/train_gbt_fgdc.py` — trains the production GBT on the enriched cube; reports v1-comparable regime
+  metrics (next-day horizon, matched 15:1 prevalence).
+- **A/B RESULT (held-out recent ~20%, ≈2023→2026):**
+
+  | regime | FGDC v2 | v1 bar |
+  |---|---|---|
+  | **new-ignition AP** | **0.622** | ~0.63 |
+  | **spread AP** | **0.984** | ~0.98 |
+  | overall / prec@K / ROC | 0.749 / 0.319 / 0.932 | — |
+
+  FGDC **matches v1** on the hard ignition regime *and* spread — trained entirely on operational sources.
+  Directional caveat: FGDC label = VIIRS active-fire vs v1 EFFIS burned-area; window = held-out recent slice,
+  not v1's exact test set.
+
+**Precompute speedup.** `scripts/rechunk.py` (rewritten as a CLI) → `FireGuard_coarse4_t200.zarr` (200-day time
+chunks, lz4); `train_gbt_fgdc` block-reads it → train-matrix build **34 min → 73 s (~28×)**, metrics
+bit-identical. (A v1-style channel-stack was tried and dropped — rechunking keeps *named* vars, so no
+fp16/clip/channel-index plan.)
+
+**Bugs found & fixed.**
+- `train_gbt_fgdc` val regime briefly `(d2f≤6).astype(int8)` → 0/1, which `regime_metrics` reads as
+  non-land/spread — silently dropping the new-ignition cells. Fixed to `np.where(…, 2, 1)` (2=spread, 1=ignition).
+- float16 overflow (`fire_upwind_exposure` → inf near fires, `1/|d|²` blow-up): the rechunk path avoids it
+  (native dtype); capping `fire_upwind_exposure` at source is a follow-up.
+
+Closes the FGDC build → baseline-model arc. Next phase (new branch): t+1 forecast features (hindcast-archive
+discipline) + holiday/dow, Optuna, refit-on-all, calibration, the live serving loop (P6), and the external
+benchmark vs the operational fire-danger index. See ROADMAP for the 2–3-month plan.
+
+---
+
 ## 2026-06-14 — FGDC adopts Lambda architecture (+ light weather backfill)
 
 **Architecture decision.** The FGDC (v2) data pipeline adopts **Lambda architecture** as its primary
