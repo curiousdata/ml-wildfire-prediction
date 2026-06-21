@@ -62,8 +62,9 @@ def main() -> None:
 
         # stack the dynamic features for the current block of time
         for k, t in enumerate(range(t0, t1)):
-            block_array[k] = np.stack([zarr_opened[f].isel(time=t).values for f in dynamic_feature_names], axis=0).astype("float16")
-
+            array = np.stack([zarr_opened[f].isel(time=t).values for f in dynamic_feature_names], axis=0)
+            block_array[k] = np.clip(array, -6e4, 6e4).astype("float16")  # clip to avoid overflow in float16
+            
         # create a new xarray Dataset for the current block 
         block = xr.Dataset(
             {"dyn": (("time", "channel", "y", "x"), block_array)},
