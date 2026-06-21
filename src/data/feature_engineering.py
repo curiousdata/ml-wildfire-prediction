@@ -268,14 +268,20 @@ def day_of_week_sincos(day_of_week, period: float = 7.0):
 # new-ignition vs. continuation split.
 
 
-def seasonal_anomaly(values, doy, eps: float = 1e-6):
+def seasonal_anomaly(values, doy, eps: float = 1e-6, causal: bool = False):
     """Standardized anomaly vs the day-of-year climatology (per pixel).
 
-    For each calendar day-of-year d, z = (value − mean_d) / std_d, where mean_d/std_d
-    are computed across all years sharing that doy. Captures "wetter/greener/drier than
+    For each calendar day-of-year d, z = (value − mean_d) / std_d. Captures "wetter/greener/drier than
     normal for the season." Unit-independent (standardized), so it doubles as:
       - SPI-like  : seasonal_anomaly(precip_sum_90d, doy)
       - greenness : seasonal_anomaly(NDVI, doy) / seasonal_anomaly(LAI, doy)
+
+    `causal=False` (default): mean_d/std_d over ALL years sharing that doy — convenient but it leaks the
+    test period into train features AND is not reproducible at serve time (no future years). Use only for
+    one-shot exploratory stats.
+    `causal=True`: for each occurrence of doy d, the climatology uses ONLY PRIOR years (expanding window) —
+    no train/test leakage, and identical to what's available when serving "today". The first occurrence of
+    each doy has no prior → NaN (cold start; the model handles NaN).
 
     Args:
         values: (time, y, x) array. doy: (time,) integer day-of-year (1..366).
@@ -284,13 +290,32 @@ def seasonal_anomaly(values, doy, eps: float = 1e-6):
     """
     values = np.asarray(values, dtype="float64")
     doy = np.asarray(doy)
-    out = np.empty_like(values, dtype="float32")
+    if not causal:
+        out = np.empty_like(values, dtype="float32")
+        for d in np.unique(doy):
+            sel = doy == d
+            block = values[sel]
+            mean = np.nanmean(block, axis=0)
+            std = np.nanstd(block, axis=0)
+            out[sel] = ((block - mean) / (std + eps)).astype("float32")
+        return out
+    out = np.full(values.shape, np.nan, dtype="float32")          # causal: NaN where no prior year exists
     for d in np.unique(doy):
-        sel = doy == d
-        block = values[sel]
-        mean = np.nanmean(block, axis=0)
-        std = np.nanstd(block, axis=0)
-        out[sel] = ((block - mean) / (std + eps)).astype("float32")
+        idx = np.where(doy == d)[0]                               # this doy's occurrences, chronological
+        block = values[idx]                                      # [n_occ, y, x]
+        if block.shape[0] < 2:
+            continue
+        fin = np.isfinite(block)                                 # NaN-aware expanding mean/std (O(n))
+        cnt = np.cumsum(fin, axis=0).astype("float64")
+        ssum = np.cumsum(np.where(fin, block, 0.0), axis=0)
+        ssq = np.cumsum(np.where(fin, block ** 2, 0.0), axis=0)
+        for k in range(1, block.shape[0]):                       # occurrence k uses priors 0..k-1 (index k-1)
+            c = cnt[k - 1]
+            with np.errstate(invalid="ignore", divide="ignore"):
+                mean = ssum[k - 1] / c
+                std = np.sqrt(np.maximum(ssq[k - 1] / c - mean ** 2, 0.0))
+                z = (block[k] - mean) / (std + eps)
+            out[idx[k]] = np.where(c >= 2, z, np.nan).astype("float32")   # need ≥2 priors (1 → std=0 → blowup)
     return out
 
 
