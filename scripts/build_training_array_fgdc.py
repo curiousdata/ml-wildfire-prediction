@@ -19,53 +19,65 @@ CODEC = Blosc(cname="lz4", clevel=5, shuffle=Blosc.SHUFFLE)  # fast decompress f
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--factor", type=int, default=4)
-    ap.add_argument("--block", type=int, default=100)
-    ap.add_argument("--cube", type=str, default="FireGuard", help="path to cube zarr (overrides factor)")
-    args = ap.parse_args()
+    # parse arguments
+    argument_parser = argparse.ArgumentParser()
+    argument_parser.add_argument("--factor", type=int, default=4)
+    argument_parser.add_argument("--block", type=int, default=100)
+    argument_parser.add_argument("--cube", type=str, default="FireGuard", help="path to cube zarr (overrides factor)")
+    args = argument_parser.parse_args()
 
-    cube = project_root / "data" / "gold" / f"{args.cube}_coarse{args.factor}.zarr"
-    out = project_root / "data" / "gold" / f"{args.cube}_coarse{args.factor}_dyn.zarr"
-    feats = FGDC_FEATURE_VARS
+    # define input/output paths and features
+    input_path = project_root / "data" / "gold" / f"{args.cube}_coarse{args.factor}.zarr"
+    output_path = project_root / "data" / "gold" / f"{args.cube}_coarse{args.factor}_dyn.zarr"
+    feature_names = FGDC_FEATURE_VARS
 
-    # open the cube directly as z
-    z = xr.open_zarr(cube, consolidated=True)
+    # open the cube directly as zarr_open
+    zarr_opened = xr.open_zarr(input_path, consolidated=True)
 
     # define dynamic variables
-    dyn_names = [f for f in feats if f in z and "time" in z[f].dims]
+    dynamic_feature_names = [
+        feature for feature in feature_names if feature in zarr_opened and "time" in zarr_opened[feature].dims  
+    ]
 
-    T = int(z.sizes["time"]); H, W = z.sizes["y"], z.sizes["x"]; Cd = len(dyn_names)
+    # get input sizes: time, height, width, number of dynamic features
+    time_size = int(zarr_opened.sizes["time"])
+    height_size, width_size = zarr_opened.sizes["y"], zarr_opened.sizes["x"]
+    dynamic_channel_size = len(dynamic_feature_names)
 
-    if out.exists():
-        import shutil; shutil.rmtree(out)
+    if output_path.exists():
+        import shutil; shutil.rmtree(output_path)
 
-    time_coord = z["time"]
-    first = True
-    for t0 in range(0, T, args.block):
-        t1 = min(t0 + args.block, T)
-        bd = np.empty((t1 - t0, Cd, H, W), dtype="float16")
+    # build the training array in blocks of time
+    time_coord = zarr_opened["time"]
+    is_first_block = True
+    
+    for t0 in range(0, time_size, args.block):
+        t1 = min(t0 + args.block, time_size)
+        block_array = np.empty((t1 - t0, dynamic_channel_size, height_size, width_size), dtype="float16")
 
+        # stack the dynamic features for the current block of time
         for k, t in enumerate(range(t0, t1)):
-            bd[k] = np.stack([z[f].isel(time=t).values for f in dyn_names], axis=0).astype("float16")
+            block_array[k] = np.stack([zarr_opened[f].isel(time=t).values for f in dynamic_feature_names], axis=0).astype("float16")
 
+        # create a new xarray Dataset for the current block 
         block = xr.Dataset(
-            {"dyn": (("time", "channel", "y", "x"), bd)},
+            {"dyn": (("time", "channel", "y", "x"), block_array)},
             coords={"time": time_coord.isel(time=slice(t0, t1)),
-                    "channel": np.array(dyn_names, dtype=object),
-                    "y": z["y"], "x": z["x"]},
+                    "channel": np.array(dynamic_feature_names, dtype=object),
+                    "y": zarr_opened["y"], "x": zarr_opened["x"]},
         )
+        # define encoding for the dynamic variable and write to zarr
         enc = {"dyn": {"compressor": CODEC}}
-        if first:
-            block.attrs["dyn_features"] = ",".join(dyn_names)
+        if is_first_block:
+            block.attrs["dyn_features"] = ",".join(dynamic_feature_names)
             block.attrs["normalized"] = "false"
-            block.to_zarr(out, mode="w", encoding=enc, consolidated=True, zarr_format=2)
-            first = False
+            block.to_zarr(output_path, mode="w", encoding=enc, consolidated=True, zarr_format=2)
+            is_first_block = False
         else:
-            block.to_zarr(out, mode="a", append_dim="time", consolidated=True, zarr_format=2)
-        print(f"  {t1}/{T}", flush=True)
+            block.to_zarr(output_path, mode="a", append_dim="time", consolidated=True, zarr_format=2)
+        print(f"  {t1}/{time_size}", flush=True)
 
-    print(f"[stack] done -> {out}", flush=True)
+    print(f"[stack] done -> {output_path}", flush=True)
 
 
 if __name__ == "__main__":
