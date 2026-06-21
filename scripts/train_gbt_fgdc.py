@@ -24,7 +24,7 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 import scripts.train as T                              # reuse regime_metrics + project_root
 from src.data.features_fireguard import FGDC_FEATURE_VARS
 
-CUBE = T.project_root / "data" / "gold" / "FireGuard_coarse4.zarr"
+CUBE = T.project_root / "data" / "gold" / "FireGuard_coarse4_t200.zarr"
 REGIME_KM = 6.0          # v1's regime_dist_cells=1.5 × 4 km cell → spread if dist_to_fire(t) ≤ 6 km
 NEG_RATIO = 30           # train negatives kept per positive (per day), to bound the rare-event matrix
 
@@ -37,44 +37,55 @@ def main():
     horizon = 1
     rng = np.random.default_rng(0)
 
-    z = xr.open_zarr(str(CUBE), consolidated=True)
-    feats = [f for f in FGDC_FEATURE_VARS if f in z]
-    miss = [f for f in FGDC_FEATURE_VARS if f not in z]
+    datacube = xr.open_zarr(str(CUBE), consolidated=True)
+    feats = [f for f in FGDC_FEATURE_VARS if f in datacube]
+    miss = [f for f in FGDC_FEATURE_VARS if f not in datacube]
     if miss:
         log.warning(f"{len(miss)} features missing from cube (skipped): {miss}")
-    dyn = [f for f in feats if "time" in z[f].dims]
-    stat = [f for f in feats if "time" not in z[f].dims]
-    dyn_set = set(dyn)
-    log.info(f"{len(feats)} features = {len(dyn)} dynamic + {len(stat)} static; horizon={horizon}d")
+    dynamic_features = [f for f in feats if "time" in datacube[f].dims]
+    stat = [f for f in feats if "time" not in datacube[f].dims]
+    dynamic_feature_set = set(dynamic_features)
+    log.info(f"{len(feats)} features = {len(dynamic_features)} dynamic + {len(stat)} static; horizon={horizon}d")
 
-    isf = z["is_fire"].values
+    isf = datacube["is_fire"].values
     Tn, H, W = isf.shape
-    land = np.nan_to_num(z["is_spain"].values) > 0.5
-    d2f = z["dist_to_fire"]                                       # lazy; one day sliced at a time
-    stat_vals = {f: z[f].values.astype(np.float32)[land] for f in stat}   # static layers read once
+    land = np.nan_to_num(datacube["is_spain"].values) > 0.5
+    stat_vals = {f: datacube[f].values.astype(np.float32)[land] for f in stat}   # static layers read once
     tmax = Tn - 1 - horizon
     cut = int((tmax + 1) * 0.8)
     log.info(f"{Tn} days, {int(land.sum())} land cells; train ≤ day {cut}, val > {cut}")
 
-    def build_feat(t):                                           # day-t matrix in FGDC_FEATURE_VARS order
-        dvals = {f: z[f].isel(time=t).values.astype(np.float32)[land] for f in dyn}
-        return np.stack([dvals[f] if f in dyn_set else stat_vals[f] for f in feats], -1)
+    def build_feat(block, local_t):
+        """
+        Build a feature matrix for a given day t (or local_t in a block) by stacking dynamic and static features.
+        """
+        dvals = {f: block[f].isel(time=local_t).values.astype(np.float32)[land] for f in dynamic_features}
+        return np.stack([dvals[f] if f in dynamic_feature_set else stat_vals[f] for f in feats], -1)
 
     def label(t):
         return (isf[t + 1:t + 1 + horizon] > 0.5).any(0).astype(np.int8)[land]
 
     # --- TRAIN (first 80% of days; subsample negatives to NEG_RATIO:1) ---
-    t0 = time.time()
     Xtr, ytr = [], []
-    for t in range(0, cut, 8 if smoke else 1):
-        feat = build_feat(t); yt = label(t)
-        pos = np.where(yt == 1)[0]; neg = np.where(yt == 0)[0]
-        if neg.size > NEG_RATIO * pos.size:
-            neg = rng.choice(neg, NEG_RATIO * max(pos.size, 1), replace=False)
-        keep = np.concatenate([pos, neg])
-        Xtr.append(feat[keep]); ytr.append(yt[keep])
+    build_start = time.time()
+    for t0 in range(0, cut, 200):
+        block = datacube[dynamic_features].isel(time=slice(t0, t0+200)).load()
+        for local_t, t in enumerate(range(t0, min(t0 + 200, cut))):
+
+            # Build the feature matrix and label vector for the current day t, subsampling negatives 
+            feat = build_feat(block, local_t)
+            yt = label(t)
+
+            pos = np.where(yt == 1)[0]; neg = np.where(yt == 0)[0]
+            if neg.size > NEG_RATIO * pos.size:
+                neg = rng.choice(neg, NEG_RATIO * max(pos.size, 1), replace=False)
+
+            keep = np.concatenate([pos, neg])
+            Xtr.append(feat[keep]); ytr.append(yt[keep])
     Xtr = np.concatenate(Xtr); ytr = np.concatenate(ytr)
-    log.info(f"train matrix {Xtr.shape}, pos rate {ytr.mean():.4f} (built in {time.time()-t0:.0f}s)")
+    log.info(f"train matrix {Xtr.shape}, pos rate {ytr.mean():.4f} (built in {time.time()-build_start:.0f}s)")
+
+    # --- FIT GBT ---
 
     params = dict(max_iter=50 if smoke else 400, learning_rate=0.05, max_leaf_nodes=63,
                   l2_regularization=1.0, validation_fraction=0.1, early_stopping=True, random_state=0)
@@ -85,12 +96,20 @@ def main():
 
     # --- VAL (last 20% of days; per-day eval, full prevalence accumulated) ---
     probs, ys, regs = [], [], []
-    for t in range(cut, tmax + 1, 4 if smoke else 1):
-        probs.append(gbt.predict_proba(build_feat(t))[:, 1])
-        ys.append(label(t))
-        regs.append(np.where(d2f.isel(time=t).values[land] <= REGIME_KM, 2, 1).astype(np.int8))
+    val_start = time.time()
+    for t0 in range(cut, tmax + 1, 200):
+        block = datacube[dynamic_features].isel(time=slice(t0, t0+200)).load()
+        for local_t, t in enumerate(range(t0, min(t0 + 200, tmax + 1))):
+            feat = build_feat(block, local_t)
+            yt = label(t)
+            probt = gbt.predict_proba(feat)[:, 1]
+            regt = np.where(block["dist_to_fire"].isel(time=local_t).values[land] <= REGIME_KM, 2, 1).astype(np.int8)
+            probs.append(probt); ys.append(yt); regs.append(regt)
+
+
     prob = np.concatenate(probs); y = np.concatenate(ys); reg = np.concatenate(regs)
     m = T.regime_metrics(prob, y, reg)
+    log.info(f"VAL built in {time.time()-val_start:.0f}s")
     log.info(f"VAL next-day:  new-ign AP={m['new_ignition_ap']:.4f} (v1 bar≈0.63)  spread={m['spread_ap']:.4f}  "
              f"overall={m['overall_ap']:.4f}  prec@K={m['prec_at_k']:.4f}  roc={m['roc']:.4f}")
 
