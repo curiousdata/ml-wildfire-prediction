@@ -1,0 +1,36 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software or its derived data/models, please cite it as below,
+  and also cite the IberFire dataset it is built on (see references).
+title: "ML Wildfire Prediction — next-day wildfire-occurrence modelling for Spain"
+abstract: >-
+  Point-wise gradient-boosted modelling of next-day wildfire occurrence over
+  Spain on the IberFire datacube, with a calibrated risk product and a live
+  operational monitor (Fire Guard).
+type: software
+authors:
+  - given-names: Vladimir
+    family-names: Morozov
+repository-code: "https://github.com/curiousdata/ml-wildfire-prediction"
+license: Apache-2.0
+keywords:
+  - wildfire
+  - machine-learning
+  - gradient-boosting
+  - remote-sensing
+  - Spain
+references:
+  - type: article
+    title: >-
+      IberFire — a detailed creation of a spatio-temporal dataset for wildfire
+      risk assessment in Spain
+    authors:
+      - given-names: Julen
+        family-names: Erzibengoa
+      - given-names: Meritxell
+        family-names: Gómez-Omella
+      - given-names: Izaro
+        family-names: Goienetxea
+    year: 2025
+    url: "https://arxiv.org/abs/2505.00837"
+    notes: "Dataset: https://zenodo.org/records/15225886"

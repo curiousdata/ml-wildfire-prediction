@@ -24,6 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 import datetime as _dt
+import os
 import numpy as np
 
 import scripts.fetch_openmeteo as OM
@@ -35,6 +36,26 @@ HOURLY_VARS = ["temperature_2m", "relative_humidity_2m", "surface_pressure",
                "wind_speed_10m", "wind_direction_10m", "soil_moisture_7_to_28cm",
                "soil_temperature_7_to_28cm"]
 FETCH_STEP = 0.25  # ERA5 native ~0.25°; fetch grid then regrid to 1 km
+
+# Weather bronze is stored at NATIVE ERA5 resolution (the ~0.25° source points), NOT upsampled to 1 km —
+# storing 1 km was ~71 MB/day (~370 GB for 13 yr) of pure interpolation redundancy (CHANGES.md 2026-06-14).
+# Native = ~200 KB/day; build_silver regrids to 1 km on read via the cached make_regridder. Each npz carries
+# the source point coords under these reserved keys so the regridder can be rebuilt; build_silver excludes them.
+WLON, WLAT = "__lon__", "__lat__"
+
+
+def atomic_savez(path, **arrays):
+    """Write a compressed npz atomically: to a temp file, then os.replace → rename. A crash (e.g. ENOSPC)
+    leaves only the temp file, never a truncated 'present' partition that skip-existing would treat as done.
+    The temp name ends in .npz so np.savez_compressed doesn't silently append its own .npz suffix."""
+    path = Path(path)
+    tmp = path.with_name(path.stem + ".tmp.npz")
+    try:
+        np.savez_compressed(tmp, **arrays)
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
 
 
 def _stats(arr2d):
@@ -71,7 +92,8 @@ def daily_point_features(hv, times, daily_precip, date):
 
 
 def build_day(date, plon=None, plat=None, hv=None, times=None, dprecip=None, step=FETCH_STEP):
-    """Fetch (if not supplied) + aggregate + regrid one day → {feature: grid[NY,NX]} on the 1 km grid."""
+    """Fetch (if not supplied) + aggregate + regrid one day → {feature: grid[NY,NX]} on the 1 km grid.
+    (Regridded output — used by --validate and any live 1 km consumer; the bronze WRITE path stores native.)"""
     gx, gy = grid.x_coords(), grid.y_coords()
     if hv is None:
         plon, plat, hv, times = OM.fetch_grid_hourly_range(date, date, HOURLY_VARS, step=step, models="era5")
@@ -81,11 +103,56 @@ def build_day(date, plon=None, plat=None, hv=None, times=None, dprecip=None, ste
     return {f: OM.regrid_to_cube(plon, plat, vec, gx, gy) for f, vec in feats.items()}
 
 
+def native_day(date, step=FETCH_STEP):
+    """Fetch + aggregate one day → NATIVE per-point dict {feature: vec[n_pts], __lon__, __lat__} (no regrid).
+    This is what the bronze stores; build_silver regrids to 1 km on read."""
+    plon, plat, hv, times = OM.fetch_grid_hourly_range(date, date, HOURLY_VARS, step=step, models="era5")
+    _, _, dly, _ = OM.fetch_grid_range(date, date, ["precipitation_sum"], step=step, models="era5")
+    feats = daily_point_features(hv, times, dly["precipitation_sum"][0], date)
+    out = {k: np.asarray(v, np.float32) for k, v in feats.items()}
+    out[WLON] = np.asarray(plon, np.float64); out[WLAT] = np.asarray(plat, np.float64)
+    return out
+
+
 def write_day(date):
     BRONZE.mkdir(parents=True, exist_ok=True)
-    out = build_day(date)
-    np.savez_compressed(BRONZE / f"{date}.npz", **{k: v.astype(np.float32) for k, v in out.items()})
+    out = native_day(date)
+    atomic_savez(BRONZE / f"{date}.npz", **out)
     return out
+
+
+def backfill_range(start, end, chunk_days=60, step=FETCH_STEP):
+    """Efficient backfill: Open-Meteo serves a whole date RANGE in one request per coord-batch, so we fetch
+    the hourly+daily stack in chunk_days windows (one fetch per chunk, not per day), then aggregate+regrid
+    +write each day. ~chunk_days× fewer requests than per-day. Resumable (skips days whose npz exists).
+
+    NOTE — Open-Meteo free tier is QUOTA-LIMITED (per-minute/hour/day). Large multi-year backfills must run
+    on a fresh quota; dev validate runs consume it. Bigger chunk_days = fewer requests = friendlier. If 429s
+    persist (daily cap), just re-run later — it resumes from the first missing day."""
+    import logging
+    log = logging.getLogger("ingest_weather")
+    BRONZE.mkdir(parents=True, exist_ok=True)
+    d = _dt.date.fromisoformat(start); last = _dt.date.fromisoformat(end)
+    while d <= last:
+        cend = min(d + _dt.timedelta(days=chunk_days - 1), last)
+        days = [(d + _dt.timedelta(days=k)).isoformat() for k in range((cend - d).days + 1)]
+        if all((BRONZE / f"{x}.npz").exists() for x in days):
+            log.info(f"{d}..{cend}: all exist, skip"); d = cend + _dt.timedelta(days=1); continue
+        plon, plat, hv, times = OM.fetch_grid_hourly_range(d.isoformat(), cend.isoformat(), HOURLY_VARS,
+                                                           step=step, models="era5")
+        _, _, dly, ddates = OM.fetch_grid_range(d.isoformat(), cend.isoformat(), ["precipitation_sum"],
+                                                step=step, models="era5")
+        didx = {dt: k for k, dt in enumerate(ddates)}
+        lonf, latf = np.asarray(plon, np.float64), np.asarray(plat, np.float64)
+        for x in days:
+            if (BRONZE / f"{x}.npz").exists():
+                continue
+            feats = daily_point_features(hv, times, dly["precipitation_sum"][didx[x]], x)
+            out = {f: np.asarray(vec, np.float32) for f, vec in feats.items()}
+            out[WLON] = lonf; out[WLAT] = latf                       # native: store source coords, regrid on read
+            atomic_savez(BRONZE / f"{x}.npz", **out)
+        log.info(f"{d}..{cend}: wrote {len(days)} days native ({step}° fetch, 1 chunk request)")
+        d = cend + _dt.timedelta(days=1)
 
 
 def main():
@@ -115,15 +182,8 @@ def main():
         write_day(date); log.info(f"wrote weather {date}"); return
     if "--backfill" in a:
         i = a.index("--backfill"); start, end = a[i + 1], a[i + 2]
-        d = _dt.date.fromisoformat(start); last = _dt.date.fromisoformat(end)
-        while d <= last:
-            ds = d.isoformat()
-            if (BRONZE / f"{ds}.npz").exists():
-                log.info(f"{ds}: exists, skip")
-            else:
-                write_day(ds); log.info(f"wrote weather {ds}")
-            d += _dt.timedelta(days=1)
-        return
+        step = float(a[a.index("--step") + 1]) if "--step" in a else FETCH_STEP
+        backfill_range(start, end, step=step); return
     print("Use --validate DATE | --backfill START END | --append [DATE]", file=sys.stderr)
 
 

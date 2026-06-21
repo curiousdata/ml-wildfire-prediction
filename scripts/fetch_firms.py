@@ -33,15 +33,31 @@ CUBE = Path(__file__).resolve().parents[1] / "data" / "gold" / "IberFire_coarse4
 FIRMS_BASE = "https://firms.modaps.eosdis.nasa.gov/api/area/csv"
 
 
-def fetch_firms(map_key: str, date: str, src: str = "VIIRS_SNPP_NRT", bbox=(-10.0, 35.0, 5.0, 44.5)):
-    """Fetch active-fire detections for the bbox (W,S,E,N) on `date`; return DataFrame (needs FIRMS_MAP_KEY)."""
+def fetch_firms(map_key: str, date: str, src: str = "VIIRS_SNPP_NRT", bbox=(-10.0, 35.0, 5.0, 44.5),
+                days: int = 1, tries: int = 5):
+    """Fetch active-fire detections for the bbox (W,S,E,N) starting at `date` for `days` days (FIRMS area
+    API allows up to 10/request); return DataFrame. `src` selects sensor+latency, e.g. VIIRS_SNPP_NRT
+    (recent) or VIIRS_SNPP_SP (standard-processing archive, 2012-01-20→). Needs FIRMS_MAP_KEY.
+    Retries on transient errors / rate limits."""
     import io as _io
+    import time as _t
     import pandas as pd
     import requests
     w, s, e, n = bbox
-    url = f"{FIRMS_BASE}/{map_key}/{src}/{w},{s},{e},{n}/1/{date}"
-    r = requests.get(url, timeout=60); r.raise_for_status()
-    return pd.read_csv(_io.StringIO(r.text))
+    url = f"{FIRMS_BASE}/{map_key}/{src}/{w},{s},{e},{n}/{int(days)}/{date}"
+    for i in range(tries):
+        try:
+            r = requests.get(url, timeout=90)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+            _t.sleep(min(2 ** i * 4, 45)); continue
+        if r.status_code == 429 or r.status_code >= 500:
+            _t.sleep(min(2 ** i * 4, 45)); continue
+        r.raise_for_status()
+        txt = r.text
+        if txt.lstrip().lower().startswith(("invalid", "error")) or "Invalid MAP_KEY" in txt[:200]:
+            raise RuntimeError(f"FIRMS error: {txt[:120]}")
+        return pd.read_csv(_io.StringIO(txt))
+    raise RuntimeError("FIRMS unavailable after retries")
 
 
 def fires_to_grid(lons, lats, gx, gy, epsg=3035):

@@ -26,21 +26,25 @@ if str(project_root) not in sys.path:
 from src.data.feature_engineering import fire_distance_and_exposure
 
 COMPRESSOR = Blosc(cname="zstd", clevel=3, shuffle=2)
-NEW_VARS = ("dist_to_fire", "fire_upwind_exposure")
+NEW_VARS = ("dist_to_fire", "fire_upwind_exposure",
+            "precip_sum_7d", "precip_sum_30d", "precip_sum_90d", "precip_sum_180d", "precip_sum_365d")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Append §E fire-context features to a coarse cube.")
     ap.add_argument("--factor", type=int, default=4)
+    ap.add_argument("--cube", type=str, default="IberFire", help="Name of the cube to append to (default: IberFire).")
     ap.add_argument("--overwrite", action="store_true", help="Re-append even if the vars already exist.")
     args = ap.parse_args()
 
-    path = project_root / "data" / "gold" / f"IberFire_coarse{args.factor}.zarr"
+    factor, cube, overwrite = args.factor, args.cube, args.overwrite
+    
+    path = project_root / "data" / "gold" / f"{cube}_coarse{factor}.zarr"
     if not path.exists():
         raise FileNotFoundError(path)
 
     c = xr.open_zarr(path, consolidated=True)
-    if any(v in c.data_vars for v in NEW_VARS) and not args.overwrite:
+    if any(v in c.data_vars for v in NEW_VARS) and not overwrite:
         raise SystemExit(f"{NEW_VARS} already present in {path}. Use --overwrite.")
 
     xc = c["x"].values.astype("float64")
@@ -64,9 +68,28 @@ def main() -> None:
         if t % 1000 == 0:
             print(f"  {t}/{nt}")
 
+    precip = c["total_precipitation_mean"].values.copy()
+    precip_sum = np.cumsum(precip, axis=0, dtype="float64")
+
+    def _precip_sum_Nd(C: np.ndarray, N: int) -> np.ndarray:
+        out = C.copy()                           # C is ALREADY the cumsum (precip_sum) — don't cumsum again
+        out[N:] = C[N:] - C[:-N]                 # N-day window; shape stays (T,y,x); rows < N keep partial cumsum
+        return out.astype("float32")
+        
+    precip_sum_7d = _precip_sum_Nd(precip_sum, 7)
+    precip_sum_30d = _precip_sum_Nd(precip_sum, 30)
+    precip_sum_90d = _precip_sum_Nd(precip_sum, 90)
+    precip_sum_180d = _precip_sum_Nd(precip_sum, 180)
+    precip_sum_365d = _precip_sum_Nd(precip_sum, 365)
+
     ctx = xr.Dataset(
         {"dist_to_fire": (("time", "y", "x"), dist),
-         "fire_upwind_exposure": (("time", "y", "x"), expo)},
+         "fire_upwind_exposure": (("time", "y", "x"), expo),
+         "precip_sum_7d": (("time", "y", "x"), precip_sum_7d),
+         "precip_sum_30d": (("time", "y", "x"), precip_sum_30d),
+         "precip_sum_90d": (("time", "y", "x"), precip_sum_90d),
+         "precip_sum_180d": (("time", "y", "x"), precip_sum_180d),
+         "precip_sum_365d": (("time", "y", "x"), precip_sum_365d)},
         coords={"time": c["time"], "y": c["y"], "x": c["x"]},
     )
     ctx["dist_to_fire"].attrs = {"units": "km", "description": "Distance to nearest fire cell on day t (0 on fire cells)."}

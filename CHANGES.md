@@ -10,55 +10,151 @@ current dated entry — what was wrong, its impact, and the fix (or that it's fl
 
 ---
 
-## 2026-06-11 — Optuna-tuned the production GBT (Track A); roadmap revisited into two tracks
+## 2026-06-21 — FGDC v2 baseline complete: full cube → engineered features → model MATCHES v1 (the A/B)
 
-**Roadmap revisit.** ROADMAP.md was still framed around the v1 cube + U-Net era and named neither the live
-monitor nor the FGDC rebuild. Prepended a 2026-06-11 section that reconciles the project's **two tracks** —
-Track A (v1 GBT + Fire Guard control center, live & improvable today) and Track B (FGDC, the root-cause
-train=serve fix, **paused on the Open-Meteo free-tier quota**) — and re-prioritized the near-term work to
-what's API-free or makes the eventual backfill cheaper (light weather-fetch, Optuna, finish veg backfill).
+Headline: the from-scratch operational-source rebuild now has a trained production model that **matches
+IberFire v1 on next-day new-ignition skill — on operational, self-sourced feeds with zero train/serve gap.**
 
-**Optuna tuning of the production GBT (`scripts/tune_gbt.py`).** Searched the HistGBT hyperparameter space
-(40 TPE trials) against the headline operational metric — **new-ignition AP on VAL** — reusing the exact
-split/features/`collect_cells`/`regime_metrics` as `train_gbt.py`, with train + val-eval matrices
-materialized once so trials are just fit+predict. **TEST (2022–24) is touched-once** — evaluated only by the
-final refit, never during search. Result: a uniformly-better-but-marginal config (test new-ign AP
-**0.633→0.639**, prec@K **0.453→0.463**, val new-ign AP **0.651→0.670**; every metric up on both splits).
-The winners favor **stronger regularization + feature bagging** (`min_samples_leaf` 112–254, `max_features`
-0.5–1.0, `l2` 2–9) over the under-regularized defaults (`min_samples_leaf=20, max_features=1.0, l2=1.0`).
-Top-5 trials sit on a **flat plateau** (209-leaf and 17-leaf configs score identically) → **the v1 model's
-ceiling is data/features, not hyperparameters** — the same finding that motivates Track B. **Promoted**:
-overwrote `gbt_coarse4.joblib`/`.meta.json` (git preserves the old), re-ran `calibrate_gbt.py` (ECE
-0.0044→0.0002, ranking preserved) + `gbt_importance.py` (drivers stable: `dist_to_fire`, `popdens`,
-`time_since_last_fire`). Full trial log: `reports/gbt_optuna.json`.
+**Full backfill + cube.** All three dynamic feeds complete over 2012-01-01→2026-05-31 (5265 days): weather
+(EDH ERA5 reanalysis, native 0.25° stored + regridded on read), fire (FIRMS VIIRS), veg (MODIS/MPC). Built
+silver (BitRound-12, 150 GB) → 4 km gold (5265 days). Full-span ablation (ABLATIONS.md 2026-06-18):
+**fire_context dominant (+0.042)** — its earlier negative was a single-window artifact; human/terrain
+confirmed; raw weather ~0 marginal (the engineered-weather + regime tests resolved that, below).
 
-**Live-serving backtest (`scripts/backtest_live.py`) — the honest "is the live feed accurate?" check.** Replays
-the live pipeline over in-cube fire-season days (seasonal warm-start from a *different* year + Open-Meteo
-weather/dryness + cube-truth fire via a new `fire_source="cube"` eval affordance in `live_slice.py`), scoring
-the live-assembled prediction vs the cube ceiling against true t+1 fire under the same regime. **Finding: the
-live-accuracy gap is the seasonal WARM-START, not the fire source.** With fire held at cube-truth, the
-live↔cube prediction correlation is still only ~0.12–0.16 and live new-ign AP roughly halves — the divergence
-is the warm-started *non-fire* features (vegetation, soil, and especially the fire-*history* features
-`time_since_last_fire`/`burn_frequency_365d`, borrowed from another year). Output: `reports/backtest_live.json`.
+**P4 engineered features materialized.** `add_fire_context.py` (+ multi-scale `precip_sum_{7,30,90,180,365}d`
+rolling windows via a cumsum-diff) and `add_engineered_features.py` (kbdi, spi_90d, ndvi/lai anomalies, ffwi,
+time_since_last_fire, burn_frequency_365d) run on the FGDC gold (both now `--cube`-parametrized) → 266 vars.
+P4-A inline ablation: the engineered ignition features lift new-ign AP **0.483 → 0.547**, with
+**`time_since_last_fire` the single biggest driver** (engineered weather is real but largely redundant with
+fire-memory).
 
-**Open-Meteo archive disk cache (`scripts/fetch_openmeteo.py`).** `_get` now caches immutable ARCHIVE responses
-under `data/cache/openmeteo/` (forecast never cached) — fixes the free-tier 429 wall that blocks bulk
-backtesting (the 90-day antecedent fetch per day is the quota burner; 1/day in production is fine).
+**P5 — feature set + production model + the IberFire A/B.**
+- `src/data/features_fireguard.py` — the frozen, leak-free, fixed-order **135-feature** contract (excludes the
+  `is_fire` label, masks, region id, and stale CLC 2006/2012 editions; the v1 `features.py` analog).
+- `scripts/train_gbt_fgdc.py` — trains the production GBT on the enriched cube; reports v1-comparable regime
+  metrics (next-day horizon, matched 15:1 prevalence).
+- **A/B RESULT (held-out recent ~20%, ≈2023→2026):**
 
-**Full live weather family wired (`scripts/live_slice.py` `live_weather_full`, `weather="full"`).** Refreshes
-all 24 v1 weather features (RH/wind/pressure aggregates + derived VPD/HDW/EMC/FFWI) from Open-Meteo hourly,
-reusing `ingest_weather.daily_point_features` + v1's exact FE formulas, regridded to 4 km. Backtest shows
-weather refresh alone is **marginal** (corr 0.124→0.164) — weather is climatologically stable year-to-year, so
-warm-starting it ≈ truth; the lever is fire-history + vegetation, not weather. Default stays `weather="temp"`
-(production unchanged) until the gap-closing families land.
+  | regime | FGDC v2 | v1 bar |
+  |---|---|---|
+  | **new-ignition AP** | **0.622** | ~0.63 |
+  | **spread AP** | **0.984** | ~0.98 |
+  | overall / prec@K / ROC | 0.749 / 0.319 / 0.932 | — |
 
-**Deployed the Fire Guard control center to a public HF Space** (`space/`, **live at
-https://curiousdata-fireguard.hf.space**). A slim read-only Streamlit renderer adapted from
-`docker/monolith/app_live.py`: no zarr/torch/model at runtime — reads prediction grids + a precomputed
-`display_assets.npz` (CCAA grid + map georeferencing) + `gbt_coarse4.importance.json`. Seeded with a real
-prediction; `STORE` auto-switches to the mounted `fireguard-storage` bucket (`/data`) once a scheduled engine
-publishes there. Pushed via `hf upload` (SDK switched docker→streamlit). UI is live; auto-refresh engine +
-feed-quality (fire-history → veg) are the remaining work.
+  FGDC **matches v1** on the hard ignition regime *and* spread — trained entirely on operational sources.
+  Directional caveat: FGDC label = VIIRS active-fire vs v1 EFFIS burned-area; window = held-out recent slice,
+  not v1's exact test set.
+
+**Precompute speedup.** `scripts/rechunk.py` (rewritten as a CLI) → `FireGuard_coarse4_t200.zarr` (200-day time
+chunks, lz4); `train_gbt_fgdc` block-reads it → train-matrix build **34 min → 73 s (~28×)**, metrics
+bit-identical. (A v1-style channel-stack was tried and dropped — rechunking keeps *named* vars, so no
+fp16/clip/channel-index plan.)
+
+**Bugs found & fixed.**
+- `train_gbt_fgdc` val regime briefly `(d2f≤6).astype(int8)` → 0/1, which `regime_metrics` reads as
+  non-land/spread — silently dropping the new-ignition cells. Fixed to `np.where(…, 2, 1)` (2=spread, 1=ignition).
+- float16 overflow (`fire_upwind_exposure` → inf near fires, `1/|d|²` blow-up): the rechunk path avoids it
+  (native dtype); capping `fire_upwind_exposure` at source is a follow-up.
+
+Closes the FGDC build → baseline-model arc. Next phase (new branch): t+1 forecast features (hindcast-archive
+discipline) + holiday/dow, Optuna, refit-on-all, calibration, the live serving loop (P6), and the external
+benchmark vs the operational fire-danger index. See ROADMAP for the 2–3-month plan.
+
+---
+
+## 2026-06-14 — FGDC adopts Lambda architecture (+ light weather backfill)
+
+**Architecture decision.** The FGDC (v2) data pipeline adopts **Lambda architecture** as its primary
+vocabulary — the speed-layer / batch-layer split — because a train/serve gap at the live edge is *inherent*
+(ERA5 reanalysis does not exist for "today"), so the question is how to *manage* it, not avoid it:
+
+- **Batch layer** — immutable, append-only **master dataset** of best-grade observations (EDH ERA5
+  *reanalysis*, finalized VIIRS, MODIS) → recomputes the **batch view** = the training cube (1 km → 4 km +
+  engineered). Cadence: **monthly** on reanalysis finalization. Training-grade. The 2012→present backfill is
+  this layer's one-time seed.
+- **Speed layer** — freshest-source trailing-edge slices (Open-Meteo *forecast* / FIRMS NRT) + live
+  predictions for the last ~7 days; transient (superseded once batch finalizes those dates). Cadence:
+  **daily**. Operational-grade.
+- **Serving layer** — the merged risk product the Space reads: `batch view if date ≤ watermark else speed
+  view`; watermark = last date the batch layer has finalized.
+
+One codepath: `reconcile(start, end, layer="batch"|"speed")` — **same feature transform + grid**, only the
+source *vintage* differs → daily HF job = speed, monthly EDH job = batch, Space = serving. On HF the layers
+map to: HF Dataset (store, git = lineage) · scheduled Jobs (engine) · the Space (UI). **Medallion
+(bronze/silver/gold) is retained as the within-batch refinement axis** (orthogonal to Lambda's latency axis).
+Physical paths are **adopt-forward** (not renamed mid-backfill). Discipline carried from v1's failure: the
+trailing-edge forecast-vs-reanalysis skew is small + bounded but **must be measured** on the overlap — v1's
+sin was an *unmeasured* gap (EFFIS-trained vs FIRMS-served, 0.10 corr), not a gap per se.
+
+**Light weather backfill (batch-layer seed).** Two optimizations made the multi-year ERA5 pull cheap enough
+to run: (1) `fetch_openmeteo.make_regridder` precomputes the source→cube interpolation once (barycentric +
+nearest-fill) — bit-exact vs per-call `griddata`, ~38× faster/field; (2) switched the weather source from the
+public ARCO Zarr (whole-globe chunks → ~3.7 TB for 13 yr) to **Earth Data Hub (DestinE)** ERA5, chunked for
+time analysis (4320 h × 64 × 64) → a Spain slice pulls ~GBs; store opened once, 6-month block reads aligned
+to the time-chunk, 16-worker fetch. EDH values match ARCO to ~3 decimals; ~25× faster/month. CDS time-series
+was evaluated and rejected (point-only — not viable for a gridded cube).
+
+**Bugs found & fixed.**
+- **Weather bronze filled the disk (~370 GB) + non-atomic writes left corrupt partials.** The backfill stored
+  weather *upsampled to 1 km* (~71 MB/day, ~99.8% redundant interpolation from the ~2318 ERA5 points) and
+  hit ENOSPC at ~2021; ENOSPC mid-`savez` left truncated npz that skip-existing treated as done. **Fix:** store
+  native 0.25° per-point vectors + coords (~118 KB/day, ~600× smaller), regrid native→1 km on read in
+  `build_silver` (values bit-identical); `atomic_savez` (temp→rename, name ends `.npz`) + `_qc_native` gate so
+  a crash never leaves a "present" corrupt partition.
+- **Veg backfill crashed: `UnboundLocalError: 'e'`.** In `ingest_veg.build_range`, `except Exception as e:`
+  deletes `e` at block end (Python 3), but `e` was also the end-date passed to `_search()` on the next
+  collection → the first composite skip wiped the end-date and aborted the whole run. **Fix:** renamed the
+  exception var to `exc`.
+- **Veg MPC 403s (expired SAS signatures).** The client signed assets once at search time (`pc.sign_inplace`),
+  but slow multi-composite chunks read tiles >1 h later, after the token expired → HTTP 403. **Fix:** sign each
+  tile href FRESH right before reading (`pc.sign` in `_mosaic_reproject`); search no longer signs. Validated:
+  NDVI vs v1 corr 0.9909 on 2012-07-15.
+
+---
+
+## 2026-06-10 — FGDC P2 vegetation complete + ablation practice established
+
+**Vegetation (P2) done & validated, keyless.** `ingest_veg.py` pulls MODIS NDVI/EVI (13A1), LAI/FAPAR (15A2H),
+LST (11A2) from **Microsoft Planetary Computer** (no Earthdata login) → mosaic Spain tiles → reproject_match
+to the 1 km grid → composite→daily interp. NDVI vs v1 corr **0.9918**. Folded into `build_silver` (261 vars
+now: 27 dynamic + 234 static) → coarsen → train. Deployment decision recorded (HF Space + GH-Actions engine,
+deferred). giga-spatial assessed & rejected (DGGS-only, no projected-grid/temporal model).
+
+**Ablation practice established (user-requested).** New committed **`ABLATIONS.md`** registry + reusable
+`scripts/fgdc_ablation.py` (leave-one-group-out + target-horizon, identical-setup with/without, AP+ROC).
+Rule: every major feature/source/target change gets a documented with/vs/without entry before it's "kept".
+First clean results (Aug-2016 slice, directional):
+- **Multi-horizon target (user idea): KEEP (strong)** — val AP 0.026 (1d) → 0.148 (3d) → 0.226 (7d).
+- **Leave-one-group-out:** **human features dominate (+0.030 AP)** — validates the GHS-POP/BUILT investment;
+  vegetation modest (+0.003) on a single month (expected; re-test across seasons on the backfill).
+- Honest correction: the earlier "veg lift 0.028→0.077" was a *conflated* comparison (different horizon/
+  code); the clean ablation shows veg adds +0.003 on this slice — exactly the trap the practice catches.
+
+**P3 started — GHS-POP population + temporal interpolation.** `ingest_static.py` downloads GHS-POP (and
+GHS-BUILT-S) R2023A 1 km global from JRC, clips Spain, reprojects Mollweide→1 km EPSG:3035. **Temporal
+interpolation** built (`interp_to_date` linear-between-editions vs `nearest_to_date` step-snap baseline — the
+two arms of the user-prioritized interpolation ablation). GHS-POP validated: mean **84 ppl/km²**, sensible
+2015→2020 growth (83.6→85.0). Agreement with v1's WorldPop is **moderate (log-corr 0.48)** — expected, they're
+different dasymetric products (GHS disaggregates census onto built-up; WorldPop RF-smooths); GHS-POP is chosen
+for forward-continuity to 2030 (WorldPop stops 2020), not v1 parity. **The interpolation ablation needs a
+MULTI-YEAR span** (population barely moves within one month) → queued for the full backfill, not the slice.
+Next P3: wire GHS-POP into build_silver (replace v1's stale popdens), add GHS-BUILT-S as an ablation
+candidate, inherit CORINE/OSM/Natura2000 from v1, compute calendar.
+
+**Sample backfill (2015–2018) — operational finding: Open-Meteo quota.** Fire (1461 days ✓) + GHS-POP/BUILT
+(✓) done; veg running. **Weather hit a 429 rate-limit at ~120 days** — not volume (a 4 yr backfill is only
+~250–700 requests) but the free-tier daily/hourly quota was already spent by the day's many validate/dev
+runs. Mitigations: `backfill_range` chunk default 30→60 days (fewer, larger range requests); the backfill is
+resumable (skips existing days) so it's re-run when quota refreshes. Strategy note: the eventual full
+2012→present weather pull should run once on a fresh quota (or the scheduled engine accumulates it forward).
+
+### Bugs found & fixed
+- **MODIS QA fill contamination** *(found → fixed)*. MOD15A2H fill DN (249–255) survived scaling → FAPAR 1.20
+  (>1!), LAI 10.2. Fixed by masking each product to its valid DN range before scaling → FAPAR ≤1, LAI ≤7.
+- **reproject_match nodata = 0** *(found → fixed)*. Reprojection filled uncovered areas with 0, not NaN →
+  20% of LST = 0 K (mean 248 K, median fine at 310). Fixed with `write_nodata(np.nan)` on the masked tiles +
+  `nodata=np.nan` through merge/reproject; LST mean back to **311.8 K**. Also dropped `nan_to_num` in the
+  trainer so HistGBT handles veg cloud-gaps natively instead of seeing a misleading 0.
 
 ## 2026-06-08 — Fire Guard Datacube (FGDC): recollect the cube from operational, same-source providers
 
@@ -94,8 +190,44 @@ Schroeder et al. 2014 (RSE).
 **P0 done.** `src/data/ingest/grid.py` — canonical 1 km EPSG:3035 grid, **aligned to v1**: 920×1188, origins
 (2674734.3466, 2492195.9911) ±1000 m; `--verify` confirms block-mean ×4 reproduces v1's coarse4 x/y centres
 exactly (so FGDC gold shares v1's grid → clean per-cell A/B). Provisional masks refined ×4 from v1 (P3
-re-derives from CORINE/DEM). Next: P1 vertical slice (ERA5-Land weather + VIIRS fire + terrain → silver →
-coarsen → train).
+re-derives from CORINE/DEM).
+
+**P1 vertical slice — GATE PASSED.** Built + validated the dynamic ingesters and proved the full pipeline on
+recollected Aug-2016 data:
+- `ingest_weather.py` — **uniform ERA5** (era5_land lacks pressure/wind/precip via Open-Meteo) hourly→daily
+  (t2m/RH/pressure/wind→u,v/precip/soil), regrid to 1 km; `backfill_range` fetches a whole window in one
+  request/batch. Validated vs v1 (2015-07-11): t2m corr 0.95, RH 0.99, wind 0.90. Fixes: Open-Meteo wind is
+  km/h→÷3.6 m/s; `_get` now retries on timeouts.
+- `ingest_fire.py` — VIIRS_SNPP_SP archive → 1 km is_fire (conf≥nominal). Gotcha: FIRMS area API day_range
+  caps at **5** (not 10); SP covers 2012-01-20→2026-04-27, NRT tiles after. Aug-2016: 31 days, 45–65 cells/d.
+- `build_silver.py` → `silver/FireGuard.zarr` (256 vars = 22 dynamic + **234 static inherited from v1**,
+  refined ×4 — lossless at 4 km gold, static doesn't drift). `coarsen_fgdc.py` → `gold/FireGuard_coarse4.zarr`
+  (230×297; is_fire/*_max→max, *_min→min, else mean — FGDC stores wind u/v directly so v1's coarsen.py is
+  left untouched).
+- `smoke_train.py` — next-day GBT on the slice: 933,630 rows, **855 positives (0.092%)**, **ROC-AUC 0.847**
+  with no vegetation yet — sane signal, machinery proven.
+
+**P3 population decision:** source population from **GHS-POP (R2023A)** (100 m, 1975–2030 incl. projections)
+rather than re-inheriting v1's WorldPop, which stops at 2020 → stale for the FGDC's 2021→ live edge; `popdens`
+is a top-2/3 ignition driver, so its forward-staleness matters. Add **GHS-BUILT-S** (built-up surface) as an
+ablation candidate (WUI/structure exposure beyond `popdens`/CLC); keep only if importance earns it. Skip SMOD.
+
+**giga-spatial: not adopted** — assumes H3/S2/Mercator DGGS not arbitrary EPSG:3035 projected grids, no
+temporal model, 4/8 sources uncovered, AGPL+GEE. Only its WorldPop/GHSL/GADM downloaders worth referencing.
+
+**P2 vegetation — keyless via Microsoft Planetary Computer (plan refinement).** `ingest_veg.py` pulls MODIS
+**modis-13A1-061** (NDVI/EVI, 500 m 16-day) from MPC's STAC — **no NASA Earthdata login** (MPC is
+anonymous-read + SAS-signed COGs), a better fit for the FGDC keyless principle than the planned earthaccess
+route. Pipeline: search Spain sinusoidal tiles (h17/h18 × v04/v05) → mosaic → reproject_match onto the 1 km
+EPSG:3035 grid → linear composite→daily interp. **Validated: FGDC MODIS NDVI vs v1 NDVI (2016-08-14) MAE
+0.032, corr 0.9918** (v1 used CGLS; the ~+0.03 cross-sensor bias is harmonizable). MODIS covers 2012→~2026;
+VIIRS VNP13/15 forward-bridge is a later task (not on MPC; harmonize on the overlap). LAI/FAPAR (15A2H) +
+NDWI/NDMI (09A1) follow the same pattern.
+Fixes: pin `PROJ_DATA` to rasterio's bundled proj_data (shell leaks a broken conda PROJ_DATA; pyproj's db is
+version-incompatible with rasterio's GDAL); per-tile full-read-with-retry + GDAL_HTTP_MAX_RETRY for transient
+MPC COG `TIFFReadEncodedTile` partial reads.
+
+Next: fold veg into the slice + re-train; full backfill 2012→present; P3 static (GHS-POP/BUILT) + P4 parity.
 
 ## 2026-06-07 — Live antecedent dryness (A.1) — done & validated; + a FIRMS-vs-EFFIS fire mismatch found
 
