@@ -34,6 +34,7 @@ Thumbs.db
 data/IberFire_demo.csv
 data/IberFire_demo.parquet
 data/silver/*.zarr
+data/bronze/
 
 
 # MLFlow metadata and artifacts
@@ -51,6 +52,7 @@ models/resnet50_v1.pth
 models/resnext50_32x4d_v1.pth
 models/se_resnet50_v1.pth
 models/se_resnext50_32x4d_v1.pth
+
 # Experimental seg checkpoints stay local; LFS-track a keeper explicitly (cf. resnet34_v9.pth)
 models/*.pth
 CLAUDE.md

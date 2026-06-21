@@ -1,0 +1,80 @@
+{
+  "window": {
+    "start": "2024-08-05",
+    "end": "2024-08-05",
+    "stride": 1,
+    "weather": "full",
+    "n_days": 1
+  },
+  "n_fire_cells_t1": 13,
+  "pooled_pred_corr": 0.16422224656976642,
+  "cube": {
+    "roc": 0.6707181002436307,
+    "overall_ap": 0.13298458174946087,
+    "new_ignition_ap": 0.11013336382548758,
+    "spread_ap": NaN,
+    "prec_at_k": 0.0,
+    "n_pos": 13
+  },
+  "live": {
+    "roc": 0.4625913145729511,
+    "overall_ap": 0.0573547129212872,
+    "new_ignition_ap": 0.059213660366697146,
+    "spread_ap": NaN,
+    "prec_at_k": 0.0,
+    "n_pos": 13
+  },
+  "delta": {
+    "roc": -0.20812678567067955,
+    "overall_ap": -0.07562986882817367,
+    "new_ignition_ap": -0.05091970345879043,
+    "spread_ap": NaN,
+    "prec_at_k": 0.0
+  },
+  "per_day": [
+    {
+      "date": "2024-08-05",
+      "target": "2024-08-06",
+      "warmstart_idx_date": "2023-08-06",
+      "warmstart_ddoy": 0,
+      "pred_corr": 0.16422224656976642,
+      "n_fire_t1": 13,
+      "refreshed": [
+        "t2m_mean",
+        "t2m_max",
+        "t2m_min",
+        "t2m_range",
+        "RH_mean",
+        "RH_max",
+        "RH_min",
+        "RH_range",
+        "surface_pressure_mean",
+        "surface_pressure_max",
+        "surface_pressure_min",
+        "surface_pressure_range",
+        "wind_speed_mean",
+        "wind_speed_max",
+        "wind_u_mean",
+        "wind_v_mean",
+        "wind_u_atmaxspeed",
+        "wind_v_atmaxspeed",
+        "total_precipitation_mean",
+        "VPD_mean",
+        "VPD_peak",
+        "HDW",
+        "emc_peak",
+        "ffwi",
+        "weather:full",
+        "precip_sum_7d",
+        "precip_sum_30d",
+        "precip_sum_90d",
+        "total_precipitation_mean",
+        "kbdi",
+        "antecedent-dryness",
+        "dist_to_fire",
+        "fire:cube-truth(backtest)"
+      ]
+    }
+  ],
+  "note": "LIVE = seasonal warm-start (other-year nearest DOY) + Open-Meteo temp/dryness + cube-truth fire; scored vs true t+1 under cube regime. Gap = real serving degradation (warm-start + weather approximation); fire held at training source (EFFIS), so this isolates the v1-fixable part \u2014 the structural fire-source question is the FGDC track."
+}

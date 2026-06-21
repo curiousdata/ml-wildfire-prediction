@@ -1,0 +1,7 @@
+# Fire Guard Space — slim, read-only renderer. NO torch / smp / zarr / xarray / sklearn:
+# predictions are precomputed by the engine and read from store/*.npz; display assets are precomputed.
+streamlit>=1.30
+folium>=0.15
+numpy>=1.24
+pillow
+pyproj>=3.6

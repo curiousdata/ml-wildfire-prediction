@@ -1,5 +1,6 @@
 {
-  "model": "HistGradientBoostingClassifier (point-wise, post-2026-06-07 pivot)",
+  "model": "HistGradientBoostingClassifier (Optuna-tuned; Track A v1 cube)",
+  "tuned_from": "models/gbt_coarse4.joblib (hand-picked defaults)",
   "cube": "/Users/vladimir/ml-wildfire-prediction/data/gold/IberFire_coarse4.zarr",
   "n_features": 146,
   "features": [
@@ -151,15 +152,19 @@
     "wind_v_mean"
   ],
   "params": {
-    "max_iter": 400,
-    "learning_rate": 0.05,
-    "max_leaf_nodes": 63,
-    "l2_regularization": 1.0,
+    "learning_rate": 0.0561162492818243,
+    "max_leaf_nodes": 209,
+    "min_samples_leaf": 254,
+    "l2_regularization": 2.084892446970225,
+    "max_features": 0.6924772243725014,
+    "class_weight": null,
+    "max_iter": 600,
     "validation_fraction": 0.1,
     "early_stopping": true,
+    "n_iter_no_change": 20,
     "random_state": 0
   },
-  "n_iter": 209,
+  "n_iter": 211,
   "train_rows": 40296,
   "train_pos_rate": 0.03811792656779289,
   "splits": {
@@ -168,20 +173,20 @@
     "test": "2022-01-01..2024-12-31"
   },
   "val": {
-    "roc": 0.9706836334577394,
-    "overall_ap": 0.8382585242346431,
-    "new_ignition_ap": 0.6508894651053067,
-    "spread_ap": 0.9988694244807829,
-    "prec_at_k": 0.38929617404937744,
+    "roc": 0.9730886930120173,
+    "overall_ap": 0.8496987253704864,
+    "new_ignition_ap": 0.669508038098627,
+    "spread_ap": 0.9992682104907199,
+    "prec_at_k": 0.3980938494205475,
     "n_pos": 1364
   },
   "test": {
-    "roc": 0.9744417019609306,
-    "overall_ap": 0.8586101166824756,
-    "new_ignition_ap": 0.6329783138843561,
-    "spread_ap": 0.9975296420294701,
-    "prec_at_k": 0.4533565938472748,
+    "roc": 0.9754136177813346,
+    "overall_ap": 0.8641588295349724,
+    "new_ignition_ap": 0.6394053550534323,
+    "spread_ap": 0.9975679683373652,
+    "prec_at_k": 0.462510883808136,
     "n_pos": 2294
   },
-  "note": "serve = predict_proba on normalized per-cell features (same dataset pipeline); no logit adj."
+  "note": "PROMOTED 2026-06-11 (Optuna search, scripts/tune_gbt.py + reports/gbt_optuna.json). Replaces hand-picked defaults; uniformly better on val+test (test new-ign AP 0.633->0.639, prec@K 0.453->0.463). Serve = predict_proba per cell; calibrator + importances regenerated for this model."
 }
