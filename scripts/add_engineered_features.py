@@ -101,13 +101,14 @@ def main() -> None:
            {"units": "mm", "description": f"Keetch-Byram Drought Index (daily_rain={TP_TO_DAILY_MM}*tp, approx)."})
     del tp, daily_rain, tmax
 
-    # --- seasonal anomalies (SPI proxy + greenness) ---
-    append("spi_90d", ("time", "y", "x"), seasonal_anomaly(c["precip_sum_90d"].values, doy),
-           {"description": "Standardized 90-day precip anomaly vs day-of-year climatology (SPI proxy)."})
-    append("ndvi_anomaly", ("time", "y", "x"), seasonal_anomaly(c["NDVI"].values, doy),
-           {"description": "NDVI anomaly vs day-of-year climatology (z-score)."})
-    append("lai_anomaly", ("time", "y", "x"), seasonal_anomaly(c["LAI"].values, doy),
-           {"description": "LAI anomaly vs day-of-year climatology (z-score)."})
+    # --- seasonal anomalies (SPI proxy + greenness) — CAUSAL climatology (prior years only): no train/test
+    #     leakage and identical to what's available at serve time (CHANGES.md / code-review #1). ---
+    append("spi_90d", ("time", "y", "x"), seasonal_anomaly(c["precip_sum_90d"].values, doy, causal=True),
+           {"description": "Standardized 90-day precip anomaly vs PRIOR-year day-of-year climatology (causal SPI proxy)."})
+    append("ndvi_anomaly", ("time", "y", "x"), seasonal_anomaly(c["NDVI"].values, doy, causal=True),
+           {"description": "NDVI anomaly vs PRIOR-year day-of-year climatology (causal z-score)."})
+    append("lai_anomaly", ("time", "y", "x"), seasonal_anomaly(c["LAI"].values, doy, causal=True),
+           {"description": "LAI anomaly vs PRIOR-year day-of-year climatology (causal z-score)."})
 
     # --- fire-weather / fuel / vegetation (pointwise, from coarse vars) ---
     emc_peak = equilibrium_moisture_content(c["t2m_max"].values, c["RH_min"].values)
