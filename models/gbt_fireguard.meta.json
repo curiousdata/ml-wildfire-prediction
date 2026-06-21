@@ -1,6 +1,6 @@
 {
   "model": "HistGradientBoostingClassifier (FGDC v2, point-wise)",
-  "cube": "/Users/vladimir/ml-wildfire-prediction/data/gold/FireGuard_coarse4.zarr",
+  "cube": "/Users/vladimir/ml-wildfire-prediction/data/gold/FireGuard_coarse4_t200.zarr",
   "n_features": 135,
   "features": [
     "CLC_2018_1",
