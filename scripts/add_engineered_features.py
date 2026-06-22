@@ -38,6 +38,8 @@ from src.data.feature_engineering import (
     seasonal_anomaly,
     terrain_curvature,
     topographic_position_index,
+    vpd_kpa,
+    hdw_index
 )
 
 COMPRESSOR = Blosc(cname="zstd", clevel=3, shuffle=2)
@@ -118,6 +120,12 @@ def main() -> None:
            fosberg_ffwi(emc_peak, c["wind_speed_max"].values).astype("float32"),
            {"description": "Fosberg Fire Weather Index (EMC_peak + wind_speed_max); higher=worse."})
     del emc_peak
+    vpd_peak = vpd_kpa(c["t2m_max"].values, c["RH_min"].values)
+    append("vpd_peak", ("time", "y", "x"), vpd_peak.astype("float32"),
+           {"units": "kPa", "description": "Vapor Pressure Deficit (VPD) from t2m_max/RH_min; higher=drier."})
+    hdw = hdw_index(c["t2m_max"].values, c["RH_min"].values, c["wind_speed_max"].values)
+    append("hdw", ("time", "y", "x"), hdw.astype("float32"),
+           {"description": "High-Desert Weather Index (t2m_max + RH_min + wind_speed_max); higher=worse."})
     append("fvc", ("time", "y", "x"),
            fractional_vegetation_cover(c["NDVI"].values).astype("float32"),
            {"description": "Fractional vegetation cover [0,1] from NDVI (Carlson & Ripley)."})
