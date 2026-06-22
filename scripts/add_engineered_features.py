@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import xarray as xr
 from numcodecs import Blosc
 
@@ -39,7 +40,9 @@ from src.data.feature_engineering import (
     terrain_curvature,
     topographic_position_index,
     vpd_kpa,
-    hdw_index
+    hdw_index,
+    day_of_year_sincos,
+    day_of_week_sincos
 )
 
 COMPRESSOR = Blosc(cname="zstd", clevel=3, shuffle=2)
@@ -172,6 +175,26 @@ def main() -> None:
     append("burn_frequency_365d", ("time", "y", "x"),
            rolling_sum_time(fire, 365).astype("float32"),
            {"description": "Number of fire-days in the trailing 365 days (NaN for first 364)."})
+    
+    # --- calendar features (doy, dow, holidays) ---
+    dates = c["time"].values; dates_tp1 = dates + np.timedelta64(1, "D")
+    pd_dates = pd.DatetimeIndex(dates)
+    pd_dates_tp1 = pd.DatetimeIndex(dates_tp1)
+
+    doy = pd_dates.dayofyear; dow = pd_dates.dayofweek
+    doy_tp1 = pd_dates_tp1.dayofyear; dow_tp1 = pd_dates_tp1.dayofweek
+
+    append("day_of_year_sincos", ("time",), np.broadcast_to(v[:, None, None], (T, ny, nx))
+           # day_of_year_sincos(doy).astype("float32"), (len(doy), 2)),
+           # TODO: for correct memory-efficient broadcast with np
+           {"description": "Day-of-year sine/cosine encoding (2 channels)."})
+    append("day_of_week_sincos", ("time",), day_of_week_sincos(dow).astype("float32"),
+           {"description": "Day-of-week sine/cosine encoding (2 channels)."})
+    append("day_of_year_sincos_tp1", ("time",), day_of_year_sincos(doy_tp1).astype("float32"),
+           {"description": "Day-of-year sine/cosine encoding (2 channels) for the next day."})
+    append("day_of_week_sincos_tp1", ("time",), day_of_week_sincos(dow_tp1).astype("float32"),
+           {"description": "Day-of-week sine/cosine encoding (2 channels) for the next day."})
+
 
     print("[enrich] done.")
 
