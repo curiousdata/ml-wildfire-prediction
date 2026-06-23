@@ -18,6 +18,10 @@ redundant features, so we curate for *correctness + the serve contract*, not for
 Kept: ``is_natura2000`` (a real static land attribute, not a subsetting mask).
 
 Built from ``data/gold/FireGuard_coarse4.zarr`` after P4 materialization (266 vars → 135 features).
+
+Appended 2026-06-23 (fgdc-forecast-features, append-only — order preserved): ``vpd_peak``, ``hdw``
+(fire-weather couplings on day t) + the 10-channel calendar block (``doy_*`` for target day t+1;
+``dow_*``/``dow_*_tp1`` for t and t+1; ``is_holiday_{national,regional}{,_tp1}``). → 147 features.
 """
 from typing import List
 
@@ -157,4 +161,17 @@ FGDC_FEATURE_VARS: List[str] = [
     "wind_u_mean",
     "wind_v_atmaxspeed",
     "wind_v_mean",
+    # --- appended 2026-06-23 (fgdc-forecast-features); APPEND-ONLY, do not reorder ---
+    "vpd_peak",
+    "hdw",
+    "doy_sin",
+    "doy_cos",
+    "dow_sin",
+    "dow_cos",
+    "dow_sin_tp1",
+    "dow_cos_tp1",
+    "is_holiday_national",
+    "is_holiday_regional",
+    "is_holiday_national_tp1",
+    "is_holiday_regional_tp1",
 ]
