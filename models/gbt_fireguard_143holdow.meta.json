@@ -1,31 +1,8 @@
-"""Canonical Fire Guard Datacube (FGDC / v2) feature set — the single source of truth.
-
-Both training (``scripts/train_gbt.py``) and the live serving path import ``FGDC_FEATURE_VARS`` from here,
-so the channel layout can never silently drift between train and serve (the v1 lesson — see CLAUDE.md).
-
-**Channel ORDER is load-bearing.** The model and any ``stats/`` normalization are trained with exactly this
-order; reordering or inserting in the middle corrupts a loaded model. Treat as append-only unless retraining.
-
-Selection principle (2026-06-19): **all serveable, non-leaky vars, frozen in a fixed order.** A GBT tolerates
-redundant features, so we curate for *correctness + the serve contract*, not for pruning signal. Excluded:
-  * ``is_fire`` — the LABEL (target is is_fire(t+1); never feed it as a feature).
-  * ``is_spain`` / ``is_sea`` / ``is_waterbody`` — subsetting masks, constant over land.
-  * ``AutonomousCommunities`` — a region ID (reporting only; an ordinal code is meaningless as a feature).
-  * ``CLC_2006_*`` / ``CLC_2012_*`` — STALE land-cover editions; for a 2022→present serving window the 2018
-    edition is the serve-appropriate snapshot, and carrying three editions of the same cell is redundant +
-    a vintage mismatch. **Kept ``CLC_2018_*`` only** (flagged for review — collapse to the proportions later
-    if the one-hots add noise to driver attribution).
-Kept: ``is_natura2000`` (a real static land attribute, not a subsetting mask).
-
-Built from ``data/gold/FireGuard_coarse4.zarr`` after P4 materialization (266 vars → 135 features).
-
-Note (2026-06-24): a calendar/holiday + HDW/VPD block (`vpd_peak`, `hdw`, `doy_*`, `dow_*`, `is_holiday_*`)
-was materialized into the cube and ablated — **flat-to-negative, dropped** from this set (see ABLATIONS.md
-2026-06-23). The vars remain in the cube for a possible future calendar × forecast-weather interaction test.
-"""
-from typing import List
-
-FGDC_FEATURE_VARS: List[str] = [
+{
+  "model": "HistGradientBoostingClassifier (FGDC v2, point-wise)",
+  "cube": "/Users/vladimir/ml-wildfire-prediction/data/gold/FireGuard_coarse4_t200.zarr",
+  "n_features": 143,
+  "features": [
     "CLC_2018_1",
     "CLC_2018_10",
     "CLC_2018_11",
@@ -161,4 +138,35 @@ FGDC_FEATURE_VARS: List[str] = [
     "wind_u_mean",
     "wind_v_atmaxspeed",
     "wind_v_mean",
-]
+    "dow_sin",
+    "dow_cos",
+    "dow_sin_tp1",
+    "dow_cos_tp1",
+    "is_holiday_national",
+    "is_holiday_regional",
+    "is_holiday_national_tp1",
+    "is_holiday_regional_tp1"
+  ],
+  "horizon": 1,
+  "regime_km": 6.0,
+  "params": {
+    "max_iter": 400,
+    "learning_rate": 0.05,
+    "max_leaf_nodes": 63,
+    "l2_regularization": 1.0,
+    "validation_fraction": 0.1,
+    "early_stopping": true,
+    "random_state": 0
+  },
+  "n_iter": 400,
+  "val": {
+    "roc": 0.9314677962881688,
+    "overall_ap": 0.7480934049077238,
+    "new_ignition_ap": 0.6214058458254033,
+    "spread_ap": 0.9831492626700225,
+    "prec_at_k": 0.3170449124241805,
+    "n_pos": 14673
+  },
+  "split": "chrono 80/20 of 5264 days (train \u2264 4211)",
+  "note": "v1-comparable new-ign AP at matched 15:1 prevalence; label=VIIRS active-fire (vs v1 EFFIS)."
+}

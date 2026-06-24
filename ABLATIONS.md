@@ -45,6 +45,60 @@ model, same metric. Reproduce with `scripts/fgdc_ablation.py` (`--groups` for le
 
 ---
 
+### 2026-06-23 — Calendar / holidays + HDW / VPD (human-ignition proxies + fire-weather couplings) → **DROP (all 12 — holidays/dow flat in isolation too)**
+- **Idea:** append 12 features to the production set — `vpd_peak`, `hdw` (instantaneous fire-weather couplings
+  at day *t*) + a 10-channel calendar block: `doy_sin/cos` (target day *t+1*), `dow_sin/cos` at *t* and *t+1*,
+  and `is_holiday_{national,regional}` at *t* and *t+1* (regional via the `holidays` lib subdiv keyed off
+  `AutonomousCommunities`; national/regional kept non-redundant).
+- **Hypothesis:** human-caused ignition follows a weekly/holiday rhythm the cube didn't encode (the only
+  *genuinely new* signal); HDW/VPD add hot-dry-windy couplings. The `t` vs `t+1` pairing was meant to span the
+  nowcast ("ignited on today's holiday, detected tomorrow") vs forecast ("ignites on tomorrow's holiday") cases.
+- **Setup:** `FireGuard_coarse4` (5265 days, 2012→2026-05), target `is_fire(t+1)`, horizon=1, HistGBT (400 iters),
+  chronological 80/20, TRAIN neg 30:1 / VAL full-prevalence, regime split @ 6 km, AP at matched 15:1 — **identical
+  to the production 135-feature run, toggling ONLY the +12 features** (135 → 147).
+- **Result:** (held-out val, n_pos 14,673)
+
+  | metric | 135 | 147 | Δ |
+  |---|---|---|---|
+  | **new-ignition AP** | 0.6215 | 0.6230 | **+0.0015** |
+  | spread AP | 0.9835 | 0.9831 | −0.0004 |
+  | overall AP | 0.7484 | 0.7492 | +0.0008 |
+  | prec@K | 0.3230 | 0.3217 | −0.0013 |
+  | ROC | 0.9316 | 0.9314 | −0.0002 |
+- **Verdict — DROP all 12.** The bundle (147) was flat (new-ign +0.0015; prec@K/ROC down). The **isolated
+  re-test (2026-06-24): 135 + the 8 holiday/dow channels = 143 features** (redundant `vpd_peak`/`hdw`/`doy_*`
+  dropped) is flat-to-negative too:
+
+  | metric | 135 | 143 (+holiday/dow) | Δ |
+  |---|---|---|---|
+  | new-ignition AP | 0.6215 | 0.6214 | −0.0001 |
+  | spread AP | 0.9835 | 0.9831 | −0.0004 |
+  | prec@K | 0.3230 | 0.3170 | −0.0060 |
+  | ROC | 0.9316 | 0.9315 | −0.0001 |
+
+  Even isolated from the redundant fire-weather/seasonality, the human-ignition signal adds nothing — new-ign is
+  dead flat and prec@K drops 0.006 (8 dead channels mildly *hurt* the operational top-K). **Hypothesis rejected:**
+  weekly/holiday ignition timing is already fully proxied by `popdens`/`dist_to_roads`/`dist_to_urban` (and the
+  VIIRS active-fire label, spanning multi-day burns, smears the weekly pulse). Production stays 135
+  (`gbt_fireguard_135.joblib`; flat 147 kept as `_147`, 143 as `_143holdow`). **All 12 vars remain in the CUBE**
+  (free on disk) for a possible future calendar × forecast-weather *interaction* test, but are **dropped from the
+  production feature set** → `FGDC_FEATURE_VARS` trims back to 135.
+- **Why flat:** redundancy. (a) `hdw`=VPD×wind and `vpd_peak` are collinear with `ffwi` + the raw t2m/RH/wind
+  channels already in the set. (b) `doy` seasonality is already carried by the weather itself and by the seasonal
+  anomalies (`spi_90d`, `ndvi_anomaly`, which are *built* from doy climatology). (c) holidays/dow were the only
+  new signal and it's weak — human-ignition timing is already proxied by `popdens`/`dist_to_roads`/`dist_to_urban`.
+  Consistent with the **baseline panel** (same session): a linear logistic was only 0.06 behind the GBT on
+  new-ignition AP — **the engineered features already carry the signal, so more *correlated* features don't help.**
+- **Strategic read:** the headroom is **not** in human-activity proxies but in the **physical t+1 driver** the cube
+  genuinely lacks — a *forecast of tomorrow's weather* (new information), not a calendar flag (redundant). This
+  reframes the branch toward the forecast-weather build; the ceiling experiment (perfect-foresight t+1 reanalysis)
+  is the next test of whether that headroom exists.
+- **Caveats:** the features are kept in the cube for a later **calendar × forecast-weather interaction** test
+  (holiday flags may matter more once paired with tomorrow's weather); the weekly ignition pulse may also be
+  partly smeared by the VIIRS active-fire label spanning multi-day burns.
+
+---
+
 ### 2026-06-18 — FULL-SPAN re-run (2012-01-01 → 2026-05-31, 5265 days) — the trustworthy verdict
 **The full-backfill re-run the slice/summer entries were waiting for.** All three feeds complete over 14.5
 years — EDH ERA5 weather (native 0.25°, regridded on read) + FIRMS VIIRS fire + MODIS/MPC veg → silver

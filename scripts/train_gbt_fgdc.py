@@ -34,14 +34,20 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     log = logging.getLogger("train_gbt_fgdc")
     smoke = "--smoke" in sys.argv
+    # --drop f1,f2,... : train on FGDC_FEATURE_VARS minus these (feature ablation); --tag NAME suffixes the
+    # output model so an ablation run never clobbers the production gbt_fireguard.joblib slot.
+    drop = set(sys.argv[sys.argv.index("--drop") + 1].split(",")) if "--drop" in sys.argv else set()
+    tag = sys.argv[sys.argv.index("--tag") + 1] if "--tag" in sys.argv else ""
     horizon = 1
     rng = np.random.default_rng(0)
 
     datacube = xr.open_zarr(str(CUBE), consolidated=True)
-    feats = [f for f in FGDC_FEATURE_VARS if f in datacube]
+    feats = [f for f in FGDC_FEATURE_VARS if f in datacube and f not in drop]
     miss = [f for f in FGDC_FEATURE_VARS if f not in datacube]
     if miss:
         log.warning(f"{len(miss)} features missing from cube (skipped): {miss}")
+    if drop:
+        log.info(f"--drop: ablating {len(drop)} features → {sorted(drop)}")
     dynamic_features = [f for f in feats if "time" in datacube[f].dims]
     stat = [f for f in feats if "time" not in datacube[f].dims]
     dynamic_feature_set = set(dynamic_features)
@@ -113,7 +119,7 @@ def main():
     log.info(f"VAL next-day:  new-ign AP={m['new_ignition_ap']:.4f} (v1 bar≈0.63)  spread={m['spread_ap']:.4f}  "
              f"overall={m['overall_ap']:.4f}  prec@K={m['prec_at_k']:.4f}  roc={m['roc']:.4f}")
 
-    out = T.project_root / "models" / "gbt_fireguard.joblib"
+    out = T.project_root / "models" / (f"gbt_fireguard_{tag}.joblib" if tag else "gbt_fireguard.joblib")
     out.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump({"model": gbt, "features": feats}, out)
     meta = {"model": "HistGradientBoostingClassifier (FGDC v2, point-wise)", "cube": str(CUBE),
