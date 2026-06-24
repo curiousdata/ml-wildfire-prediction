@@ -24,6 +24,12 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 import scripts.train as T                              # reuse regime_metrics + project_root
 from src.data.features_fireguard import FGDC_FEATURE_VARS
 
+_WX_PREFIX = ("t2m_", "RH_", "surface_pressure_", "wind_", 
+              "total_precipitation_", "soil_")
+WEATHER_LEAD_VARS = {f for f in FGDC_FEATURE_VARS
+                     if f.startswith(_WX_PREFIX) 
+                     or f in ("ffwi", "emc_peak")}
+
 CUBE = T.project_root / "data" / "gold" / "FireGuard_coarse4_t200.zarr"
 REGIME_KM = 6.0          # v1's regime_dist_cells=1.5 × 4 km cell → spread if dist_to_fire(t) ≤ 6 km
 NEG_RATIO = 30           # train negatives kept per positive (per day), to bound the rare-event matrix
@@ -38,6 +44,7 @@ def main():
     # output model so an ablation run never clobbers the production gbt_fireguard.joblib slot.
     drop = set(sys.argv[sys.argv.index("--drop") + 1].split(",")) if "--drop" in sys.argv else set()
     tag = sys.argv[sys.argv.index("--tag") + 1] if "--tag" in sys.argv else ""
+    lead = int(sys.argv[sys.argv.index("--weather-lead") + 1]) if "--weather-lead" in sys.argv else 0
     horizon = 1
     rng = np.random.default_rng(0)
 
@@ -61,11 +68,16 @@ def main():
     cut = int((tmax + 1) * 0.8)
     log.info(f"{Tn} days, {int(land.sum())} land cells; train ≤ day {cut}, val > {cut}")
 
-    def build_feat(block, local_t):
+    def build_feat(block, local_t, lead=0):
         """
         Build a feature matrix for a given day t (or local_t in a block) by stacking dynamic and static features.
         """
-        dvals = {f: block[f].isel(time=local_t).values.astype(np.float32)[land] for f in dynamic_features}
+        dvals = {f: block[f].isel(
+            time=local_t + (
+                lead if f in WEATHER_LEAD_VARS else 0
+                )
+                ).values.astype(np.float32)[land] for f in dynamic_features}
+        
         return np.stack([dvals[f] if f in dynamic_feature_set else stat_vals[f] for f in feats], -1)
 
     def label(t):
@@ -75,11 +87,11 @@ def main():
     Xtr, ytr = [], []
     build_start = time.time()
     for t0 in range(0, cut, 200):
-        block = datacube[dynamic_features].isel(time=slice(t0, t0+200)).load()
+        block = datacube[dynamic_features].isel(time=slice(t0, t0+200+lead)).load()
         for local_t, t in enumerate(range(t0, min(t0 + 200, cut))):
 
             # Build the feature matrix and label vector for the current day t, subsampling negatives 
-            feat = build_feat(block, local_t)
+            feat = build_feat(block, local_t, lead=lead)
             yt = label(t)
 
             pos = np.where(yt == 1)[0]; neg = np.where(yt == 0)[0]
@@ -104,9 +116,9 @@ def main():
     probs, ys, regs = [], [], []
     val_start = time.time()
     for t0 in range(cut, tmax + 1, 200):
-        block = datacube[dynamic_features].isel(time=slice(t0, t0+200)).load()
+        block = datacube[dynamic_features].isel(time=slice(t0, t0+200+lead)).load()
         for local_t, t in enumerate(range(t0, min(t0 + 200, tmax + 1))):
-            feat = build_feat(block, local_t)
+            feat = build_feat(block, local_t, lead=lead)
             yt = label(t)
             probt = gbt.predict_proba(feat)[:, 1]
             regt = np.where(block["dist_to_fire"].isel(time=local_t).values[land] <= REGIME_KM, 2, 1).astype(np.int8)
