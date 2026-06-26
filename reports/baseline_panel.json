@@ -1,0 +1,66 @@
+{
+  "cube": "/Users/vladimir/ml-wildfire-prediction/data/gold/FireGuard_coarse4_t200.zarr",
+  "model": "gbt_fireguard.joblib",
+  "n_features": 135,
+  "split": "chrono 80/20 of 5264 days (val > 4211)",
+  "regime_km": 6.0,
+  "n_pos": 14673,
+  "rows": {
+    "gbt": {
+      "roc": 0.9315594017767962,
+      "overall_ap": 0.7483871285819744,
+      "new_ignition_ap": 0.6215015019022881,
+      "spread_ap": 0.9835031739609176,
+      "prec_at_k": 0.32297417024466707,
+      "n_pos": 14673
+    },
+    "logistic": {
+      "roc": 0.9093792159491315,
+      "overall_ap": 0.6586552092380666,
+      "new_ignition_ap": 0.5638509983259696,
+      "spread_ap": 0.8477289004123739,
+      "prec_at_k": 0.2898521093164315,
+      "n_pos": 14673
+    },
+    "climatology": {
+      "roc": 0.6865288612536773,
+      "overall_ap": 0.40105332067358007,
+      "new_ignition_ap": 0.32582748401710904,
+      "spread_ap": 0.565067952213964,
+      "prec_at_k": 0.24214543719757378,
+      "n_pos": 14673
+    },
+    "persistence": {
+      "roc": 0.7410017133809648,
+      "overall_ap": 0.44275511064470646,
+      "new_ignition_ap": 0.11788215019232513,
+      "spread_ap": 0.988530306146263,
+      "prec_at_k": 0.25018741906903835,
+      "n_pos": 14673
+    },
+    "ffwi": {
+      "roc": 0.5464242662408878,
+      "overall_ap": 0.07041731171906722,
+      "new_ignition_ap": 0.07229519180989465,
+      "spread_ap": 0.06697044188478957,
+      "prec_at_k": 0.0008859810536359299,
+      "n_pos": 14673
+    },
+    "kbdi": {
+      "roc": 0.4808880039705765,
+      "overall_ap": 0.06858823740069832,
+      "new_ignition_ap": 0.07373925103645511,
+      "spread_ap": 0.058232540272616894,
+      "prec_at_k": 6.815238874122537e-05,
+      "n_pos": 14673
+    },
+    "hdw": {
+      "roc": 0.596160487261191,
+      "overall_ap": 0.07870753733742623,
+      "new_ignition_ap": 0.07707144340164176,
+      "spread_ap": 0.08339698000649931,
+      "prec_at_k": 0.0006815238874122538,
+      "n_pos": 14673
+    }
+  }
+}

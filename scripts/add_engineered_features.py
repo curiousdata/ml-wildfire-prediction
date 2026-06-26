@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import xarray as xr
 from numcodecs import Blosc
 
@@ -38,6 +39,10 @@ from src.data.feature_engineering import (
     seasonal_anomaly,
     terrain_curvature,
     topographic_position_index,
+    vpd_kpa,
+    hdw_index,
+    day_of_year_sincos,
+    day_of_week_sincos
 )
 
 COMPRESSOR = Blosc(cname="zstd", clevel=3, shuffle=2)
@@ -118,6 +123,12 @@ def main() -> None:
            fosberg_ffwi(emc_peak, c["wind_speed_max"].values).astype("float32"),
            {"description": "Fosberg Fire Weather Index (EMC_peak + wind_speed_max); higher=worse."})
     del emc_peak
+    vpd_peak = vpd_kpa(c["t2m_max"].values, c["RH_min"].values)
+    append("vpd_peak", ("time", "y", "x"), vpd_peak.astype("float32"),
+           {"units": "kPa", "description": "Vapor Pressure Deficit (VPD) from t2m_max/RH_min; higher=drier."})
+    hdw = hdw_index(vpd_peak, c["wind_speed_max"].values)
+    append("hdw", ("time", "y", "x"), hdw.astype("float32"),
+           {"description": "Hot-Dry-Windy Index (VPD + wind_speed_max); higher=worse."})
     append("fvc", ("time", "y", "x"),
            fractional_vegetation_cover(c["NDVI"].values).astype("float32"),
            {"description": "Fractional vegetation cover [0,1] from NDVI (Carlson & Ripley)."})
@@ -164,6 +175,75 @@ def main() -> None:
     append("burn_frequency_365d", ("time", "y", "x"),
            rolling_sum_time(fire, 365).astype("float32"),
            {"description": "Number of fire-days in the trailing 365 days (NaN for first 364)."})
+    
+    # --- calendar features (doy, dow, holidays) ---
+    dates = c["time"].values; dates_tp1 = dates + np.timedelta64(1, "D")
+    pd_dates = pd.DatetimeIndex(dates)
+    pd_dates_tp1 = pd.DatetimeIndex(dates_tp1)
+
+    # The model predicts is_fire(t+1) from the row at t, so we expose calendar context for BOTH the
+    # feature day t AND the target day t+1. The +1 shift only matters for dow/holiday (doy(t)~=doy(t+1)),
+    # so doy is materialized once, for the target day. Every channel here is a per-day SCALAR except the
+    # regional-holiday flag, which varies in space by autonomous community. Per-day scalars are written as
+    # constant (time,y,x) planes via a zero-copy broadcast: zstd crushes a constant-per-day plane to ~nothing
+    # on disk, and keeping the (time,y,x) shape means the block-read trainer needs no special-casing.
+    import holidays as _hol
+
+    T = len(dates)
+    dow = pd_dates.dayofweek
+    doy_tp1 = pd_dates_tp1.dayofyear
+    dow_tp1 = pd_dates_tp1.dayofweek
+
+    def _plane(vec):
+        """(time,) per-day scalar -> constant-in-space (time,y,x) float32 view (zero-copy broadcast)."""
+        return np.broadcast_to(np.asarray(vec, "float32")[:, None, None], (T, ny, nx))
+
+    # cyclic sin/cos: doy for the target day t+1; dow for BOTH t and t+1 (sincos returns a (sin, cos) tuple).
+    doy_sin, doy_cos = day_of_year_sincos(doy_tp1)
+    dow_sin, dow_cos = day_of_week_sincos(dow)
+    dow_sin_tp1, dow_cos_tp1 = day_of_week_sincos(dow_tp1)
+    for name, vec, desc in [
+        ("doy_sin", doy_sin, "Day-of-year sine (target day t+1; cyclic, no New-Year seam)."),
+        ("doy_cos", doy_cos, "Day-of-year cosine (target day t+1)."),
+        ("dow_sin", dow_sin, "Day-of-week sine (feature day t; weekly human-ignition rhythm)."),
+        ("dow_cos", dow_cos, "Day-of-week cosine (feature day t)."),
+        ("dow_sin_tp1", dow_sin_tp1, "Day-of-week sine (target day t+1)."),
+        ("dow_cos_tp1", dow_cos_tp1, "Day-of-week cosine (target day t+1)."),
+    ]:
+        append(name, ("time", "y", "x"), _plane(vec), {"description": desc})
+
+    # Holidays. national = Spain-wide (constant plane); regional = community-specific EXTRA days (subdiv
+    # holidays MINUS the national set, so national/regional channels are non-redundant), painted onto cells
+    # by AutonomousCommunities code. Both for t and t+1. Codes per scripts/daily_job.py CCAA legend; code 5
+    # (Canarias) is off-grid, 0 = no region (sea/outside). Subdiv = ISO 3166-2:ES.
+    CCAA_TO_SUBDIV = {1: "AN", 2: "AR", 3: "AS", 4: "IB", 6: "CB", 7: "CL", 8: "CM", 9: "CT",
+                      10: "VC", 11: "EX", 12: "GA", 13: "MD", 14: "MC", 15: "NC", 16: "PV", 17: "RI"}
+    years = range(int(pd_dates.year.min()), int(pd_dates_tp1.year.max()) + 1)
+    nat_days = set(_hol.Spain(years=years).keys())
+
+    def _is_in(idx, dayset):
+        """boolean (time,): is each timestamp's calendar date in `dayset`?"""
+        return np.array([ts.date() in dayset for ts in idx], dtype=bool)
+
+    append("is_holiday_national", ("time", "y", "x"), _plane(_is_in(pd_dates, nat_days)),
+           {"description": "1 if day t is a Spain-wide national public holiday."})
+    append("is_holiday_national_tp1", ("time", "y", "x"), _plane(_is_in(pd_dates_tp1, nat_days)),
+           {"description": "1 if the target day t+1 is a Spain-wide national public holiday."})
+
+    ac = np.rint(np.nan_to_num(c["AutonomousCommunities"].values)).astype(int)  # (y,x) region codes
+    for tag, idx in (("", pd_dates), ("_tp1", pd_dates_tp1)):
+        reg = np.zeros((T, ny, nx), dtype=bool)
+        for code, sub in CCAA_TO_SUBDIV.items():
+            mask = ac == code
+            if not mask.any():
+                continue
+            reg_only = set(_hol.Spain(subdiv=sub, years=years).keys()) - nat_days
+            reg |= _is_in(idx, reg_only)[:, None, None] & mask[None, :, :]
+        append(f"is_holiday_regional{tag}", ("time", "y", "x"), reg.astype("float32"),
+               {"description": "1 if the day (t or t+1) is a region-specific autonomous-community holiday "
+                               "(beyond national); painted by AutonomousCommunities code."})
+        del reg
+
 
     print("[enrich] done.")
 

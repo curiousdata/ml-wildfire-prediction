@@ -24,6 +24,12 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 import scripts.train as T                              # reuse regime_metrics + project_root
 from src.data.features_fireguard import FGDC_FEATURE_VARS
 
+_WX_PREFIX = ("t2m_", "RH_", "surface_pressure_", "wind_", 
+              "total_precipitation_", "soil_")
+WEATHER_LEAD_VARS = {f for f in FGDC_FEATURE_VARS
+                     if f.startswith(_WX_PREFIX) 
+                     or f in ("ffwi", "emc_peak")}
+
 CUBE = T.project_root / "data" / "gold" / "FireGuard_coarse4_t200.zarr"
 REGIME_KM = 6.0          # v1's regime_dist_cells=1.5 × 4 km cell → spread if dist_to_fire(t) ≤ 6 km
 NEG_RATIO = 30           # train negatives kept per positive (per day), to bound the rare-event matrix
@@ -34,18 +40,36 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     log = logging.getLogger("train_gbt_fgdc")
     smoke = "--smoke" in sys.argv
+    # --drop f1,f2,... : train on FGDC_FEATURE_VARS minus these (feature ablation); --tag NAME suffixes the
+    # output model so an ablation run never clobbers the production gbt_fireguard.joblib slot.
+    drop = set(sys.argv[sys.argv.index("--drop") + 1].split(",")) if "--drop" in sys.argv else set()
+    tag = sys.argv[sys.argv.index("--tag") + 1] if "--tag" in sys.argv else ""
+    lead = int(sys.argv[sys.argv.index("--weather-lead") + 1]) if "--weather-lead" in sys.argv else 0
+    # --complement: ADD the weather vars at t+lead as EXTRA columns (keeping them at t too) — the deployment-
+    # honest "does tomorrow's forecast help ON TOP OF today's weather?" ceiling. Without it, --weather-lead
+    # SUBSTITUTES (replaces t weather with t+lead), which only tests "is t+lead as good as t".
+    complement = "--complement" in sys.argv
     horizon = 1
     rng = np.random.default_rng(0)
 
     datacube = xr.open_zarr(str(CUBE), consolidated=True)
-    feats = [f for f in FGDC_FEATURE_VARS if f in datacube]
+    feats = [f for f in FGDC_FEATURE_VARS if f in datacube and f not in drop]
     miss = [f for f in FGDC_FEATURE_VARS if f not in datacube]
     if miss:
         log.warning(f"{len(miss)} features missing from cube (skipped): {miss}")
+    if drop:
+        log.info(f"--drop: ablating {len(drop)} features → {sorted(drop)}")
     dynamic_features = [f for f in feats if "time" in datacube[f].dims]
     stat = [f for f in feats if "time" not in datacube[f].dims]
     dynamic_feature_set = set(dynamic_features)
     log.info(f"{len(feats)} features = {len(dynamic_features)} dynamic + {len(stat)} static; horizon={horizon}d")
+
+    lead_feats = [f for f in feats if f in WEATHER_LEAD_VARS]        # weather vars (feats order) to also read at t+lead
+    if complement and lead == 0:
+        lead = 1; log.info("--complement set with no --weather-lead → defaulting lead=1")
+    out_features = feats + [f"{f}_fc{lead}" for f in lead_feats] if complement else feats
+    if complement:
+        log.info(f"--complement: +{len(lead_feats)} weather channels at t+{lead} → {len(out_features)} total features")
 
     isf = datacube["is_fire"].values
     Tn, H, W = isf.shape
@@ -55,11 +79,17 @@ def main():
     cut = int((tmax + 1) * 0.8)
     log.info(f"{Tn} days, {int(land.sum())} land cells; train ≤ day {cut}, val > {cut}")
 
-    def build_feat(block, local_t):
-        """
-        Build a feature matrix for a given day t (or local_t in a block) by stacking dynamic and static features.
-        """
-        dvals = {f: block[f].isel(time=local_t).values.astype(np.float32)[land] for f in dynamic_features}
+    def build_feat(block, local_t, lead=0, complement=False):
+        """Stack the feature matrix for day t.
+        substitute (default): the weather vars are read at t+lead IN PLACE of t.
+        complement: ALL features at t, PLUS the weather vars ALSO at t+lead appended as extra columns."""
+        if complement:
+            base = {f: block[f].isel(time=local_t).values.astype(np.float32)[land] for f in dynamic_features}
+            cols = [base[f] if f in dynamic_feature_set else stat_vals[f] for f in feats]
+            cols += [block[f].isel(time=local_t + lead).values.astype(np.float32)[land] for f in lead_feats]
+            return np.stack(cols, -1)
+        dvals = {f: block[f].isel(time=local_t + (lead if f in WEATHER_LEAD_VARS else 0)).values
+                 .astype(np.float32)[land] for f in dynamic_features}
         return np.stack([dvals[f] if f in dynamic_feature_set else stat_vals[f] for f in feats], -1)
 
     def label(t):
@@ -69,11 +99,11 @@ def main():
     Xtr, ytr = [], []
     build_start = time.time()
     for t0 in range(0, cut, 200):
-        block = datacube[dynamic_features].isel(time=slice(t0, t0+200)).load()
+        block = datacube[dynamic_features].isel(time=slice(t0, t0+200+lead)).load()
         for local_t, t in enumerate(range(t0, min(t0 + 200, cut))):
 
             # Build the feature matrix and label vector for the current day t, subsampling negatives 
-            feat = build_feat(block, local_t)
+            feat = build_feat(block, local_t, lead=lead, complement=complement)
             yt = label(t)
 
             pos = np.where(yt == 1)[0]; neg = np.where(yt == 0)[0]
@@ -98,9 +128,9 @@ def main():
     probs, ys, regs = [], [], []
     val_start = time.time()
     for t0 in range(cut, tmax + 1, 200):
-        block = datacube[dynamic_features].isel(time=slice(t0, t0+200)).load()
+        block = datacube[dynamic_features].isel(time=slice(t0, t0+200+lead)).load()
         for local_t, t in enumerate(range(t0, min(t0 + 200, tmax + 1))):
-            feat = build_feat(block, local_t)
+            feat = build_feat(block, local_t, lead=lead, complement=complement)
             yt = label(t)
             probt = gbt.predict_proba(feat)[:, 1]
             regt = np.where(block["dist_to_fire"].isel(time=local_t).values[land] <= REGIME_KM, 2, 1).astype(np.int8)
@@ -113,11 +143,11 @@ def main():
     log.info(f"VAL next-day:  new-ign AP={m['new_ignition_ap']:.4f} (v1 bar≈0.63)  spread={m['spread_ap']:.4f}  "
              f"overall={m['overall_ap']:.4f}  prec@K={m['prec_at_k']:.4f}  roc={m['roc']:.4f}")
 
-    out = T.project_root / "models" / "gbt_fireguard.joblib"
+    out = T.project_root / "models" / (f"gbt_fireguard_{tag}.joblib" if tag else "gbt_fireguard.joblib")
     out.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump({"model": gbt, "features": feats}, out)
+    joblib.dump({"model": gbt, "features": out_features}, out)
     meta = {"model": "HistGradientBoostingClassifier (FGDC v2, point-wise)", "cube": str(CUBE),
-            "n_features": len(feats), "features": feats, "horizon": horizon, "regime_km": REGIME_KM,
+            "n_features": len(out_features), "features": out_features, "horizon": horizon, "regime_km": REGIME_KM,
             "params": params, "n_iter": int(gbt.n_iter_), "val": m,
             "split": f"chrono 80/20 of {tmax + 1} days (train ≤ {cut})",
             "note": "v1-comparable new-ign AP at matched 15:1 prevalence; label=VIIRS active-fire (vs v1 EFFIS)."}

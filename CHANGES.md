@@ -10,6 +10,65 @@ current dated entry — what was wrong, its impact, and the fix (or that it's fl
 
 ---
 
+## 2026-06-26 — `fgdc-forecast-features`: forecast weather PROVEN (+CAPE), calendar DROPPED, baseline floors, v1 cubes deleted
+
+Branch goal: push *past* v1 by adding next-day signal. Net — **one lever proven (t+1 forecast weather), one
+dropped (calendar/human-activity), and the non-ML baseline floor finally established.** Production integration
+of the forecast feature is **deferred** (proven but modest; the full GEFS backfill isn't worth +0.0054 now).
+
+**Detection-lag framing (the prerequisite reasoning).** The regime split already separates nowcasting (spread —
+fire adjacent at t) from forecasting (new-ignition). VIIRS overpass timing means afternoon ignitions are first
+seen at t+1, so part of "next-day fire" is half-nowcast; the model's real value lives in new-ignition. The
+right test order: the **perfect-foresight ceiling** (reanalysis t+1) first, then a real forecast trained
+hindcast-honestly as a **complement** (keep observed t-weather AND add the errorful t+1 forecast, so the GBT
+learns to weight by reliability — substitute would strand the t-observation).
+
+**Calendar / holiday / HDW / VPD → DROPPED (flat).** Materialized `doy/dow` sincos (t & t+1),
+`is_holiday_{national,regional}` (region via the `holidays` lib + `AutonomousCommunities`, t & t+1), and the
+dead `hdw`/`vpd_peak` functions. Bundled (147) and isolated (143, holiday/dow only) both flat-to-negative
+(new-ign +0.0015 = noise; prec@K *down*). Human-ignition timing is already proxied by
+`popdens`/`dist_to_roads`/`dist_to_urban`; the fire-weather couplings are collinear with `ffwi`. Reverted to the
+135-feature production set; vars kept in the cube. (ABLATIONS 2026-06-23.)
+
+**Baseline floor panel (the ML-justification we never had).** `scripts/baseline_panel.py` ranks the val by
+single non-ML scores through the same `regime_metrics`: fire-weather index (`ffwi`/`kbdi`/`hdw`) ≈ **0.07
+new-ign, ROC ~0.55** (near-random as a per-cell ranker); per-cell×doy **climatology 0.33** (the real floor);
+**persistence** 0.99 spread / 0.12 new-ign (exposing the 0.98 spread AP as **near-nowcast**); **logistic 0.56**;
+**GBT 0.6215** (reproduces the trained number → harness self-validates). Headline: the GBT beats the operational
+index ~8× and the best non-ML floor ~2× on new-ignition; spread is *not* where the model earns its keep.
+
+**Forecast weather → PROVEN (KEEP), production DEFERRED.** Ceiling (`train_gbt_fgdc --weather-lead/--complement`):
+perfect t+1 reanalysis lifts new-ign **+0.008** (t+1 subsumes t under perfect foresight). Real test: built a
+**GEFSv12-reforecast d+1 ingester** (`src/data/ingest/ingest_weather_gefs.py` — control member, `.idx`
+byte-range to fetch only the 8 d+1 messages ≈ 10% of each GRIB, stream-process-and-delete → ~0.6 GB persistent;
+RH-from-spfh, native tmax/tmin, soil dropped, CAPE free), backfilled the **2016-2019 slice (1461 days)**, ran
+the complement on an internal split (train 2016-2018 / val 2019, `scripts/train_gbt_fc1_slice.py`). **+both =
++0.0054 new-ign / +0.0054 prec@K** — real, coherent (all metrics up), ≈ **2/3 of the +0.008 ceiling**, matching
+the measured d+1 forecast skill (temp corr 0.95, debiased MAE ~1 °C, over 174 days). Split: **weather drives it
+(+0.0045)**; **CAPE alone +0.0031 but largely redundant** with weather (combined ≪ sum; CAPE's incremental over
+weather +0.0009). (ABLATIONS 2026-06-26.) **Verdict: proven, banked, kept in bronze. Production fill (full
+2012-2026 backfill incl. the un-validated operational 2020-2026 bucket → materialize → retrain → live GRIB
+serving) is deferred — not worth ~30 backfill rounds for +0.0054.**
+
+**v1 IberFire cubes deleted (−131 GB; 59 → 190 GB free).** `silver/IberFire.zarr` (87) +
+`gold/IberFire_coarse4.zarr` (29) + `_dyn` (15). Full historical reference captured first in the
+`iberfire-v1-reference` memory (cube structure, 286 vars, feature engineering, GBT-vs-U-Net, the 0.10
+fire-source bug). **NB:** the v1 cube was the FGDC static-feature source (`build_silver._load_static` →
+`grid.V1_CUBE`); static is already baked into the FGDC gold cubes, but that codepath (+ `load_masks_from_v1`,
+`ingest_static`, `ingest_veg --validate`) needs repointing if silver is ever rebuilt.
+
+### Bugs found & fixed
+- **★ Kernel panic from parallel backfill (memory exhaustion).** Launched 4 simultaneous GEFS backfill processes;
+  each holds ~36 global GRIB fields (~33 MB ea) in memory → ~5 GB across 4 procs + OS → swap exhausted → macOS
+  watchdog rebooted the machine. **Fix: single process only** (one proc at workers=4 ≈ 1.2 GB ran 100 days
+  cleanly); the 10-min harness cap means the slice backfills in ~10 resumable rounds (skip-existing).
+- **GEFS `apcp` accumulation**: per-bucket, not cumulative-from-init → sum the d+1 buckets for the daily total.
+- **GEFS wind file holds 10 m AND 100 m** → `filter_by_keys={level:10}` on read (else cfgrib u10/u100 clash).
+- **Slice-trainer val OOM risk**: full-prevalence val matrix ~14 GB → per-day eval + 100-day block-read
+  (~28× faster, memory-bounded).
+- **`train_gbt_fgdc` stray `lt_w` NameError** (misplaced boundary-guard snippet at function scope) — deleted;
+  the `--weather-lead` substitute/complement plumbing validated (lead=0 reproduces 0.6215 exactly).
+
 ## 2026-06-21 — FGDC v2 baseline complete: full cube → engineered features → model MATCHES v1 (the A/B)
 
 Headline: the from-scratch operational-source rebuild now has a trained production model that **matches
