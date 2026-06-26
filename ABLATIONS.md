@@ -40,10 +40,44 @@ model, same metric. Reproduce with `scripts/fgdc_ablation.py` (`--groups` for le
   → 0.622 (production model, 135-feature `features_fireguard`)**, spread 0.984. **FGDC matches v1's ~0.63 bar.**
   Lift concentrated in `time_since_last_fire`; engineered drought/fire-weather is real but cross-correlated
   with fire-memory (recoverable in leave-one-group-out). See CHANGES.md 2026-06-21.
-- **Still open** (next phase): t+1 forecast features (does tomorrow's-weather beat t-only? — needs
-  hindcast-archive training); CLC multi-edition + temporal interpolation (P3); external benchmark vs EFFIS/FWI.
+- ~~t+1 forecast features (does tomorrow's-weather beat t-only?)~~ **DONE 2026-06-26** — yes, +0.0054 new-ign
+  (entry above); production fill deferred.
+- ~~external benchmark vs EFFIS/FWI~~ **DONE 2026-06-26** — the baseline-floor panel (`baseline_panel.py`):
+  GBT ~8× the FWI-index, ~2× per-cell×doy climatology on new-ignition; persistence shows spread is near-nowcast.
+- **Still open** (next phase): CLC multi-edition + temporal interpolation (P3); Optuna on the frozen feature set
+  (then refit-on-all + isotonic calibration); the **forecast-weather production fill** (full GEFS backfill →
+  materialize → retrain) if/when scoped as a deliberate push.
 
 ---
+
+### 2026-06-26 — GEFS d+1 forecast weather (+CAPE) complement → **KEEP (proven; real but modest)**
+- **Idea:** add tomorrow's *forecast* of the weather block (the GEFS run issued at t, valid t+1) as **extra**
+  channels alongside the observed t-weather (complement, not substitute). 19 forecast-weather + 2 CAPE = 21
+  `*_fc1` channels, regridded from a GEFSv12-reforecast bronze (control member, idx byte-range, stream-delete).
+- **Setup:** 2016–2019 reforecast slice; internal split **train 2016–2018 / val 2019** (365 val days, 7,265 pos);
+  complement = 135 base + fc; HistGBT; regime AP at matched prevalence. `scripts/train_gbt_fc1_slice.py`,
+  `src/data/ingest/ingest_weather_gefs.py`.
+- **Result (four-way):**
+
+  | variant | new-ign | Δ | spread | overall | prec@K | Δ | roc |
+  |---|---|---|---|---|---|---|---|
+  | baseline (135) | 0.6308 | — | 0.9779 | 0.7485 | 0.3436 | — | 0.9292 |
+  | +CAPE (2) | 0.6339 | +0.0031 | 0.9781 | 0.7504 | 0.3447 | +0.0011 | 0.9305 |
+  | +weather (19) | 0.6353 | +0.0045 | 0.9777 | 0.7526 | 0.3484 | +0.0048 | 0.9318 |
+  | **+both (21)** | **0.6363** | **+0.0054** | 0.9782 | 0.7533 | **0.3489** | **+0.0054** | 0.9318 |
+- **Verdict — KEEP.** Real, **coherent** lift (all metrics up together — contrast the calendar block's flat
+  +0.0015 with mixed signs). +both = **+0.0054 new-ign / +0.0054 prec@K ≈ 2/3 of the perfect-foresight ceiling**
+  (+0.008, measured earlier on the main val by time-shifting reanalysis), exactly as predicted by the high d+1
+  forecast skill (temp **corr 0.95, debiased MAE ~1 °C** over 174 days).
+- **Split:** **weather is the primary driver** (+0.0045, and ~all the prec@K gain). **CAPE alone is a real but
+  smaller signal (+0.0031 new-ign)** and **largely redundant with weather** — combined (+0.0054) ≪ individual
+  sum (+0.0076); CAPE's *incremental* value over weather is only +0.0009. CAPE helps ranking (AP) more than
+  the operational top-K.
+- **Caveats:** (a) GEFS forecast is a *different model* than the cube's ERA5 t-weather, but its bias is a
+  constant offset the GBT absorbs (debiased MAE confirms). (b) reforecast-era slice (2016–2019) ≠ production
+  val (2023–2026); physics carries. (c) **Bronze covers only 2016–2019** — a *live production* feature still
+  needs the full-span backfill (2012–2019 reforecast + operational 2020–2026) → materialize → retrain.
+- Finding banked; features kept (`data/bronze/fireguard/weather_fc1`). See [[fgdc-build-state]].
 
 ### 2026-06-23 — Calendar / holidays + HDW / VPD (human-ignition proxies + fire-weather couplings) → **DROP (all 12 — holidays/dow flat in isolation too)**
 - **Idea:** append 12 features to the production set — `vpd_peak`, `hdw` (instantaneous fire-weather couplings
