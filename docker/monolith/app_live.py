@@ -36,7 +36,7 @@ import streamlit.components.v1 as components  # noqa: E402
 import xarray as xr  # noqa: E402
 
 STORE = ROOT / "data" / "serving_store"
-CUBE = ROOT / "data" / "gold" / "IberFire_coarse4.zarr"
+CUBE = ROOT / "data" / "gold" / "FireGuard_coarse4.zarr"   # FGDC v2 working cube (v1 IberFire cube deleted)
 CELL_HA = 4.0 * 4.0 * 100   # 4 km cell = 16 km² = 1600 ha
 CELL_KM2 = 16.0
 HIGH, ELEV, MOD = 0.50, 0.20, 0.05    # calibrated-probability risk tiers
@@ -81,7 +81,7 @@ def load_ccaa():
 
 @st.cache_data(show_spinner=False)
 def load_importance():
-    p = ROOT / "models" / "gbt_coarse4.importance.json"
+    p = ROOT / "models" / "gbt_fireguard.importance.json"   # optional; per-day occlusion drivers (in each grid) are primary
     if not p.exists():
         return None
     d = json.loads(p.read_text())
@@ -411,7 +411,6 @@ with st.expander("⚙️ Run engine now (on-demand live fetch)"):
             st.caption((r.stdout + r.stderr).strip().splitlines()[-1] if (r.stdout or r.stderr) else "done")
         st.cache_data.clear(); st.cache_resource.clear(); st.rerun()
 
-st.caption("Engine: point-wise calibrated GBT on the IberFire coarse4 grid. ⚠️ Live now: temperature + "
-           "antecedent dryness (Open-Meteo) + active fire (FIRMS, display) + model fire (EFFIS-consistent). "
-           "Vegetation & some aggregates are seasonally warm-started — see CHANGES.md “Known live-serving "
-           "inconsistencies”. Absolute risk tightens as the full live pipeline lands.")
+st.caption("Engine: point-wise isotonic-calibrated GBT (gbt_fireguard) on the FGDC v2 4 km grid — all features "
+           "self-sourced from the operational feeds it serves from (no train/serve gap). The no-cold-start daily "
+           "loop (append → recompute engineered over a trailing window → predict) replaces v1's seasonal warm-start.")
