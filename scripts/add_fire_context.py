@@ -68,38 +68,32 @@ def main() -> None:
         if t % 1000 == 0:
             print(f"  {t}/{nt}")
 
-    precip = c["total_precipitation_mean"].values.copy()
-    precip_sum = np.cumsum(precip, axis=0, dtype="float64")
+    # Memory-bounded write: each whole-cube var is ~1.4 GB at 4 km × {nt} d, so bundling all 7 + a float64
+    # cumsum in one Dataset peaked ~16 GB on a 17 GB box → swap/freeze. Write each var SEPARATELY (mode='a')
+    # and free intermediates between, so peak RAM ≈ cumsum(2.9) + one window (~few GB) instead of ~16 GB.
+    coords = {"time": c["time"], "y": c["y"], "x": c["x"]}
 
-    def _precip_sum_Nd(C: np.ndarray, N: int) -> np.ndarray:
-        out = C.copy()                           # C is ALREADY the cumsum (precip_sum) — don't cumsum again
-        out[N:] = C[N:] - C[:-N]                 # N-day window; shape stays (T,y,x); rows < N keep partial cumsum
-        return out.astype("float32")
-        
-    precip_sum_7d = _precip_sum_Nd(precip_sum, 7)
-    precip_sum_30d = _precip_sum_Nd(precip_sum, 30)
-    precip_sum_90d = _precip_sum_Nd(precip_sum, 90)
-    precip_sum_180d = _precip_sum_Nd(precip_sum, 180)
-    precip_sum_365d = _precip_sum_Nd(precip_sum, 365)
+    def _append(name: str, arr: np.ndarray, attrs: dict | None = None) -> None:
+        ds = xr.Dataset({name: (("time", "y", "x"), arr)}, coords=coords)
+        if attrs:
+            ds[name].attrs = attrs
+        ds = ds.chunk({"time": 1, "y": ny, "x": nx})
+        ds.to_zarr(path, mode="a", encoding={name: {"compressor": COMPRESSOR}}, consolidated=True, zarr_format=2)
+        print(f"  appended {name} {arr.shape} {arr.dtype}")
 
-    ctx = xr.Dataset(
-        {"dist_to_fire": (("time", "y", "x"), dist),
-         "fire_upwind_exposure": (("time", "y", "x"), expo),
-         "precip_sum_7d": (("time", "y", "x"), precip_sum_7d),
-         "precip_sum_30d": (("time", "y", "x"), precip_sum_30d),
-         "precip_sum_90d": (("time", "y", "x"), precip_sum_90d),
-         "precip_sum_180d": (("time", "y", "x"), precip_sum_180d),
-         "precip_sum_365d": (("time", "y", "x"), precip_sum_365d)},
-        coords={"time": c["time"], "y": c["y"], "x": c["x"]},
-    )
-    ctx["dist_to_fire"].attrs = {"units": "km", "description": "Distance to nearest fire cell on day t (0 on fire cells)."}
-    ctx["fire_upwind_exposure"].attrs = {"description": "(W.d)/|d|^2 downwind-exposure to nearest fire; >0 downwind, <0 upwind."}
-    ctx = ctx.chunk({"time": 1, "y": ny, "x": nx})
-    enc = {v: {"compressor": COMPRESSOR} for v in ctx.data_vars}
+    _append("dist_to_fire", dist,
+            {"units": "km", "description": "Distance to nearest fire cell on day t (0 on fire cells)."})
+    _append("fire_upwind_exposure", expo,
+            {"description": "(W.d)/|d|^2 downwind-exposure to nearest fire; >0 downwind, <0 upwind."})
+    del dist, expo, fire_all
 
-    print("[fire-context] appending to cube...")
-    with ProgressBar():
-        ctx.to_zarr(path, mode="a", encoding=enc, consolidated=True, zarr_format=2)
+    precip_sum = np.cumsum(c["total_precipitation_mean"].values, axis=0, dtype="float64")  # float64 for accuracy
+    for N in (7, 30, 90, 180, 365):
+        win = precip_sum.astype("float32")                       # rows < N keep the partial cumsum
+        win[N:] = (precip_sum[N:] - precip_sum[:-N]).astype("float32")   # N-day trailing window
+        _append(f"precip_sum_{N}d", win)
+        del win
+    del precip_sum
     print("[fire-context] done.")
 
 
