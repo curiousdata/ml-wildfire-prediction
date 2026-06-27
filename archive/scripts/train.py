@@ -38,8 +38,8 @@ from src.data.features import build_segmentation_features
 from src.models.cnn import build_unet, build_wide_deep_unet
 from src.models.losses import RegimeLogitAdjustedBCE, compute_regime_priors
 
-CUBE = project_root / "data" / "gold" / "IberFire_coarse4.zarr"
-DYN = project_root / "data" / "gold" / "IberFire_coarse4_dyn.zarr"
+CUBE = project_root / "data" / "gold" / "FireGuard_coarse4.zarr"
+DYN = project_root / "data" / "gold" / "FireGuard_coarse4_dyn.zarr"
 STATS = project_root / "stats" / "coarse4_norm_stats_train.json"
 SPLITS = {"train": ("2008-01-01", "2018-12-31"),
           "val": ("2019-01-01", "2021-12-31"),

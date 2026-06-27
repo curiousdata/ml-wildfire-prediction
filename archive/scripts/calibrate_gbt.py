@@ -61,7 +61,7 @@ def main():
     smoke = "--smoke" in sys.argv
     rng = np.random.default_rng(0)
 
-    art = joblib.load(T.project_root / "models" / "gbt_coarse4.joblib")
+    art = joblib.load(T.project_root / "models" / "gbt_fireguard.joblib")
     gbt, feats = art["model"], art["features"]
     _ = build_segmentation_features(xr.open_zarr(str(T.CUBE), consolidated=True).data_vars)
     val_ds = T.make_dataset(*T.SPLITS["val"], feats, use_stack=True)
@@ -89,9 +89,9 @@ def main():
     log.info(f"ranking preserved: AP raw={average_precision_score(yt, pt):.4f} cal={average_precision_score(yt, pt_cal):.4f} "
              f"| ROC raw={roc_auc_score(yt, pt):.4f} cal={roc_auc_score(yt, pt_cal):.4f}")
 
-    joblib.dump(iso, T.project_root / "models" / "gbt_coarse4.calibrator.joblib")
+    joblib.dump(iso, T.project_root / "models" / "gbt_fireguard.calibrator.joblib")
     rows, ece_r, brier_r = reliability(pt, yt); _, ece_c, brier_c = reliability(pt_cal, yt)
-    (T.project_root / "models" / "gbt_coarse4.calibration.json").write_text(json.dumps({
+    (T.project_root / "models" / "gbt_fireguard.calibration.json").write_text(json.dumps({
         "method": "isotonic on true-prevalence VAL (corrects neg-subsample bias)",
         "test_ece_raw": ece_r, "test_ece_calibrated": ece_c,
         "test_brier_raw": brier_r, "test_brier_calibrated": brier_c,
