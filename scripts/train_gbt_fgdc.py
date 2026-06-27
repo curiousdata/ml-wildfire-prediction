@@ -21,7 +21,7 @@ import numpy as np
 import xarray as xr
 from sklearn.ensemble import HistGradientBoostingClassifier
 
-import scripts.train as T                              # reuse regime_metrics + project_root
+from src.data import metrics as T          # torch-free regime_metrics + project_root
 from src.data.features_fireguard import FGDC_FEATURE_VARS
 
 _WX_PREFIX = ("t2m_", "RH_", "surface_pressure_", "wind_", 

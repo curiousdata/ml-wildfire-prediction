@@ -31,7 +31,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-import scripts.train as T                                # regime_metrics + project_root
+from src.data import metrics as T          # torch-free regime_metrics + project_root
 from scripts.train_gbt_fgdc import CUBE, REGIME_KM, NEG_RATIO
 
 MODEL = T.project_root / "models" / "gbt_fireguard.joblib"

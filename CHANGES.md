@@ -10,6 +10,48 @@ current dated entry — what was wrong, its impact, and the fix (or that it's fl
 
 ---
 
+## 2026-06-27 — `fgdc-serving`: monthly batch job + the silver-rebuild path made real (static preserved, regridder fixed)
+
+Goal: a **monthly job rolled out before Jul 15** that keeps the cube current with settled data. Designed the
+two-cadence Lambda split (see the `fgdc-extend-cadence` memory): **monthly batch** mutates silver with *settled*
+ERA5/VIIRS/MODIS (the only thing that touches silver), **daily** writes only the provisional gold edge (Option C,
+deferred). Built **`scripts/batch_job.py`** on the clean model *bronze is the source of truth → top up bronze
+with settled days, then rebuild silver→gold→engineered from it* (no append-mode/provisional logic — the back half
+is whole-cube anyway since the engineered features are causal/recursive). Per-feed watermarks: weather ERA5 ~5 d
+(margin 7), fire VIIRS ARCHIVE/SP where final + NRT for the recent ≤60-day edge, veg MODIS graceful-NaN.
+
+Validated the feeds (ingest-only, non-destructive): **20/20 weather+fire+veg** for 2026-06-01..06-20, MODIS data
+physically sane (NDVI [-0.2,0.99], LAI [0,7], FAPAR [0,1], LST 280–325 K). Then measured the silver rebuild on a
+51-day **temp-store** slice (real silver untouched): **0.54 s/day → full 5285-day rebuild ≈ 47 min.**
+
+Added a compact, verified **`## Module map (FGDC v2)`** to CLAUDE.md (real entry points for `src/data/ingest/` +
+`scripts/`) after repeatedly re-deriving interfaces; pointer saved as the `fgdc-module-map` memory.
+
+**Bugs found & fixed:**
+- **Silver rebuild was hard-blocked by the deleted v1 cube.** `build_silver._load_static` read `grid.V1_CUBE`
+  (deleted 2026-06-26) → any rebuild would crash on static-load. *Impact:* the monthly job could not rebuild silver
+  at all; worse, the 221 1 km static layers survived **only** inside the 150 GB silver, so a mid-rebuild failure
+  could have lost them. *Fix:* `build_silver.extract_static()` preserves them into `data/silver/FireGuard_static.zarr`
+  (44 MB, byte-identical to the refined-from-v1 static, incl. all masks); `_load_static` now reads that store
+  (V1_CUBE demoted to legacy fallback). Static-load runs *before* the rmtree, so the failure mode was at least
+  non-destructive.
+- **`build_silver` assumed a single native weather grid for all days.** It built ONE regridder from `dates[0]` and
+  applied it to every day → `IndexError` the moment a day's native grid differed. Surfaced because the new ingest's
+  bbox (`SPAIN_BBOX = -9.5,35.5,4.5,44.0`, 1995 pts) is **narrower than the historical backfill** (`-10,35.25,5,44.5`,
+  2318 pts). *Impact:* the full rebuild would have crashed in chunk 2 (caught on the temp slice, not live silver).
+  *Fix:* regridder cached **per native grid** (`_weather_regridder`, keyed by coord signature; only ~2 grids exist).
+  Verified seam-continuous across 05-31→06-01 (t2m 21.7→22.1, NDVI 0.563→0.563, no jump). *Secondary, flagged not
+  fixed:* the `SPAIN_BBOX` narrowing is a latent regression — harmless now that regridding is per-grid, but worth
+  realigning to the historical bbox so the backfill stops proliferating grids.
+- **Engineered stage ran the producer AFTER the consumer (ordering bug).** The clean from-scratch baseline
+  exposed it: `add_engineered_features`'s `spi_90d` reads `precip_sum_90d`, but `precip_sum_{7,30,90,180,365}d` is
+  *produced* by `add_fire_context` — and `batch_job`/`extend_cube` ran `add_engineered` FIRST → `KeyError:
+  'precip_sum_90d'` after ~80 min (silver+coarsen had already succeeded). *Impact:* the `coarsen --overwrite`
+  rebuilt gold before the failure, so gold was left **raw + 3 engineered (251/278 vars), serving features
+  incomplete** — recoverable (silver complete, bronze intact), needs a gold re-run. *Fix:* swapped the order to
+  **`add_fire_context` → `add_engineered_features`** in both `batch_job.py` and `extend_cube.py` (+ CLAUDE.md
+  pipeline order). `add_fire_context` depends only on raw vars, so the order is acyclic.
+
 ## 2026-06-26 — `fgdc-forecast-features`: forecast weather PROVEN (+CAPE), calendar DROPPED, baseline floors, v1 cubes deleted
 
 Branch goal: push *past* v1 by adding next-day signal. Net — **one lever proven (t+1 forecast weather), one
