@@ -43,6 +43,18 @@ Naming follow-through (deferred): weekly `batch_job` is really the **speed** tie
 **batch**. Also reviewed the incremental engine and **fixed its one real bug** (non-atomic edge write — see below)
 before it goes on a schedule.
 
+**Serving = progressive refinement (decided 2026-06-28).** Measured the question "how much fire is in hand by
+morning?" — the **night pass (~01:30 UTC, available ~morning) alone captures ~65% of a day's fire cells** (pooled
+65.8%, median 64%, IQR 58–73%; 62% of detections; 25 summer-2025 days, FIRMS SP). Surprise: the night pass has
+*more* raw detections than the afternoon (VIIRS night thermal contrast + persistent large/ag fires). So the serve
+tier **always predicts t+1 = tomorrow**, starting from a **preliminary** morning prediction (night-pass-only fire;
+weather is forecast = available) and **re-running in the evening** when the afternoon pass completes `t` — display
+and prediction sharpen. `daily_job.latest_complete_fire_date()` becomes a *preliminary-vs-final* flag, not a
+today-vs-tomorrow switch. The ~35% the night pass misses skew small/daytime/human-ignited → softer on the
+**new-ignition** regime, robust on **spread** (whose `dist_to_fire` keys off the big persistent fires the night pass
+catches). Built `extend_cube.serve_edge` (ephemeral: forecast + cube-tail seed → `compute_edge_engineered`, NO cube
+write) as the serve engine; live test pending an Open-Meteo quota reset (was 429-rate-limited; fetch now batched).
+
 ## 2026-06-27 — `fgdc-serving`: monthly batch job + the silver-rebuild path made real (static preserved, regridder fixed)
 
 Goal: a **monthly job rolled out before Jul 15** that keeps the cube current with settled data. Designed the
