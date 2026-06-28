@@ -10,6 +10,39 @@ current dated entry — what was wrong, its impact, and the fix (or that it's fl
 
 ---
 
+## 2026-06-28 — `fgdc-serving`: architecture settled — batch / speed / serve along a data-VINTAGE axis
+
+Worked the Lambda mapping with the user until it clicked. The classic batch/speed split is about *compute
+latency over identical data*; **ours is a data-VINTAGE gradient** — a calendar day's data MATURES
+forecast→ERA5T→final. That reframes everything into **three tiers, one cube, two writers** (see the
+`lambda-architecture-fgdc` memory):
+
+- **BATCH** (monthly; the TRUE batch — **not built**): best data only, **final ERA5 + FIRMS SP** (~2–3 mo lag).
+  Re-fetches and **overwrites** the cube from the `final_watermark` seam to the final edge, and **recomputes the
+  recursive engineered FORWARD from the seam** (overwriting old raw re-propagates kbdi/precip_sum_*/anomalies).
+- **SPEED** (weekly/daily; = today's `batch_job.py`, a misnomer): **ERA5T** preliminary reanalysis (~5 d lag),
+  **appends** newly-settled days to the cube. Built + validated end-to-end (first real 1-day run 2026-06-21).
+- **SERVE** (on-demand; **ephemeral**): forecast + FIRMS NRT + the cube-tail *seed* (the bundle) → run
+  `compute_edge_engineered` over the forecast band → t+1 features → predict. **Writes nothing to the cube.**
+
+**Three concrete deltas this locks in:**
+1. **Data-driven settle edge.** The only freshness limiter is *weather reanalysis* — ERA5T lags ~5 d, while fire
+   (NRT) and carried veg reach today. So push the seam to the **last available ERA5T day** (query it; ~5 d), not a
+   hardcoded `WATERMARK_DAYS=7`.
+2. **`final_watermark` seam + monthly final-reanalysis batch (the missing TRUE batch).** A single cube-attr date
+   marks `≤seam`=final · `(seam, cube_edge]`=ERA5T · `>cube_edge`=forecast(serve-only). It's the batch↔speed
+   contract AND it bounds the batch's forward recompute. Append-only speed means the cube currently holds *ERA5T
+   permanently* with no path to final — this batch is what upgrades it.
+3. **Serve is ephemeral → retires Option C.** Earlier we'd planned to write *provisional forecast rows* into gold
+   and overwrite-on-settle (Option C, `extend_cube`). The cleaner model: **never persist the forecast edge** —
+   serve computes it just-in-time and discards it. The cube is then *always* authoritative-settled; the whole
+   provisional-overwrite/atomicity class of problems vanishes. `extend_cube` becomes the ephemeral serve engine,
+   reusing `update_edge`'s `compute_edge_engineered`.
+
+Naming follow-through (deferred): weekly `batch_job` is really the **speed** tier; the monthly final job is the
+**batch**. Also reviewed the incremental engine and **fixed its one real bug** (non-atomic edge write — see below)
+before it goes on a schedule.
+
 ## 2026-06-27 — `fgdc-serving`: monthly batch job + the silver-rebuild path made real (static preserved, regridder fixed)
 
 Goal: a **monthly job rolled out before Jul 15** that keeps the cube current with settled data. Designed the
