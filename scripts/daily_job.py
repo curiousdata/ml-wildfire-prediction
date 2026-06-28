@@ -10,7 +10,8 @@ date-partitioned store:
 Modes:
   --mode replay (default): pull the day from the existing gold cube — proves the v2 plumbing, seeds the store.
   --mode live: the **no-cold-start append loop** (fetch feeds → append cube → recompute engineered features
-               over a trailing window → predict). [phase B — not built yet; raises with guidance.]
+               over a trailing window → predict). Issue date is gated by `latest_complete_fire_date()` — `t` is
+               scoreable only after its afternoon SNPP pass settles. [phase B — not built yet; raises w/ guidance.]
 
 v2 vs the legacy v1 job: `gbt_fireguard` + `FGDC_FEATURE_VARS`, **raw** features (no normalization — the GBT is
 trained raw), **torch-free** (`src.data.metrics`), reads `FireGuard_coarse4.zarr`, and **no warm-start**.
@@ -41,10 +42,24 @@ STORE = M.project_root / "data" / "serving_store"
 MODEL = M.project_root / "models" / "gbt_fireguard.joblib"
 CALIBRATOR = M.project_root / "models" / "gbt_fireguard.calibrator.joblib"
 REGIME_KM = 6.0
+# Live completeness gate: is_fire[t] is the UTC-day UNION of both SNPP passes, so day t is COMPLETE as a feature
+# day only after its ~13:30 UTC afternoon pass settles in FIRMS (~3 h). Scoring t before that uses only the night
+# pass = a partial, off-distribution label (see the `fire-label-timing` memory).
+FIRMS_AFTERNOON_SETTLE_UTC = 17     # UTC hour after which day t's afternoon SNPP pass is reliably in FIRMS
 CCAA = {1: "Andalucía", 2: "Aragón", 3: "Asturias", 4: "Baleares", 6: "Cantabria",
         7: "Castilla y León", 8: "Castilla-La Mancha", 9: "Cataluña", 10: "C. Valenciana",
         11: "Extremadura", 12: "Galicia", 13: "Madrid", 14: "Murcia", 15: "Navarra",
         16: "País Vasco", 17: "La Rioja"}
+
+
+def latest_complete_fire_date(now_utc=None):
+    """Latest UTC date usable as a COMPLETE feature day `t` (then predict t+1). is_fire[t] is the whole-UTC-day
+    union of both SNPP passes, so `t` isn't complete until its ~13:30 UTC afternoon pass settles in FIRMS
+    (~FIRMS_AFTERNOON_SETTLE_UTC UTC). Before that, today has only its night pass → latest complete is yesterday
+    (a same-day nowcast); after, it's today (a true next-day forecast). See the `fire-label-timing` memory."""
+    now = now_utc or datetime.now(timezone.utc)
+    today = now.date()
+    return today if now.hour >= FIRMS_AFTERNOON_SETTLE_UTC else today - _dt.timedelta(days=1)
 
 
 def _load():
@@ -174,7 +189,9 @@ def main():
         show(); return
     if args.mode == "live":
         raise SystemExit("--mode live = the no-cold-start append loop (fetch feeds → append cube → recompute "
-                         "engineered over a trailing window → predict). Not built yet (phase B).")
+                         "engineered over a trailing window → predict). Not built yet (phase B). When built, gate "
+                         f"the issue date on latest_complete_fire_date() — t complete only after its ~13:30 UTC "
+                         f"afternoon SNPP pass settles (~{FIRMS_AFTERNOON_SETTLE_UTC}:00 UTC); else predict from yesterday.")
 
     z, gbt, feats, calib, land, ccaa, dyn_set, stat_vals = _load()
     times = pd.DatetimeIndex(z["time"].values)
