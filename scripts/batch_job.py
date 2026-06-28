@@ -160,15 +160,18 @@ def main():
             _run("silver-full", [py, "-m", "src.data.ingest.build_silver", "--start", first_day, "--end", target_end])
         else:                                              # weekly: regrid + APPEND only the new settled days (~10 s)
             _run("silver-append", [py, "-m", "src.data.ingest.build_silver", "--append", target_end])
-    if not args.skip_gold:                                 # TODO: incremental coarsen (coarsen_fgdc.append_new) once tested
-        _run("gold", [py, "-m", "src.data.ingest.coarsen_fgdc", "--factor", str(FACTOR), "--overwrite"])
-    if not args.skip_engineered:
-        for script in ("add_fire_context.py", "add_engineered_features.py"):   # fire_context makes precip_sum_* → must precede add_engineered's spi_90d
-            _run("engineered", [py, str(PROJECT / "scripts" / script),
-                                "--cube", "FireGuard", "--factor", str(FACTOR), "--overwrite"])
+    if args.full:                                          # one-time baseline: whole-cube coarsen + engineered (heavy)
+        if not args.skip_gold:
+            _run("gold-full", [py, "-m", "src.data.ingest.coarsen_fgdc", "--factor", str(FACTOR), "--overwrite"])
+        if not args.skip_engineered:
+            for script in ("add_fire_context.py", "add_engineered_features.py"):   # fire_context FIRST (makes precip_sum_*)
+                _run("engineered", [py, str(PROJECT / "scripts" / script),
+                                    "--cube", "FireGuard", "--factor", str(FACTOR), "--overwrite"])
+    elif not (args.skip_gold and args.skip_engineered):    # weekly: coarsen ONLY new days + engineer via edge
+        _run("gold-edge", [py, str(PROJECT / "scripts" / "update_edge.py"), "--run", "--to", target_end])
 
     _verify(target_end, new_start)
-    log.info("monthly job complete — cube current to the watermark with settled data (silver mutated).")
+    log.info("batch job complete — cube current to the watermark with settled data (silver mutated).")
 
 
 if __name__ == "__main__":
