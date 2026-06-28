@@ -51,6 +51,33 @@ Added a compact, verified **`## Module map (FGDC v2)`** to CLAUDE.md (real entry
   incomplete** — recoverable (silver complete, bronze intact), needs a gold re-run. *Fix:* swapped the order to
   **`add_fire_context` → `add_engineered_features`** in both `batch_job.py` and `extend_cube.py` (+ CLAUDE.md
   pipeline order). `add_fire_context` depends only on raw vars, so the order is acyclic.
+- **Incremental gold edge was non-atomic (found in code review, fixed).** `update_edge.update_gold_edge` appended new
+  rows with NaN engineered, then computed + region-wrote engineered in a *separate* step — a crash between the two
+  (OOM/teardown/kill, all of which happened) would leave permanent NaN-engineered edge rows that the date-based
+  currency check (`new = silver days > gold_last`) mistakes for complete → serving reads NaN `dist_to_fire`, regime
+  classifier collapses. *Fix:* build a VIRTUAL extended cube (lazy zarr history + in-memory new raw + NaN
+  placeholders), compute engineered from it, then append COMPLETE rows in ONE write — a crash now leaves only
+  fewer-DAY rows the date check self-heals. Re-verified bit-identical (`--test`/`--e2e`). Also merged the two
+  near-duplicate `_causal_anomaly_edge*` fns into one (review #4).
+
+**Live-serving label semantics (settled this session).** The `is_fire[t]` label is the **whole-UTC-day union of
+VIIRS-SNPP detections** (conf ≥ nominal) with `acq_date == t` — i.e. BOTH SNPP passes that fall on UTC day `t`
+(~01:30 UTC night + ~13:30 UTC afternoon), not a single pass (`ingest_fire.py` filters `acq_date == wd`). "Day" =
+UTC calendar day. Consequence for serving: `is_fire[t]` (and `dist_to_fire[t]`, `time_since_last_fire[t]`) is
+**complete only after `t`'s ~13:30 UTC afternoon pass settles in FIRMS (~3 h → ~16:30 UTC)**. So scoring before
+that has only a *partial* `t` (night pass only) — a label-definition mismatch, not just staleness. Live rule:
+issue date `t` = latest UTC date whose afternoon SNPP pass has settled; predict `t+1`; before settle, latest
+complete `t` is yesterday (a same-day nowcast). A 5 am score predicts *today*; an evening score predicts
+*tomorrow* — the horizon is data-relative. **Baked a `latest_complete_fire_date()` gate into `daily_job`.**
+
+**Objectives logged (not yet built):**
+- **NOAA-20 VIIRS pooling — experiment.** `ingest_fire` is SNPP-only; pool NOAA-20 (VNP14IMG, 2018+) for ~2×
+  detection density / more passes. Test next-day AP lift + the train/serve-coverage seam (SNPP-only pre-2018).
+- **2/3-day union target — secondary objective.** Rolling-OR label P(fire within {2,3} d). Already **proven to
+  lift AP** (less sparse, higher-skill than the spiky t+1). New rationale from the label-settle analysis: a
+  multi-day union is **robust to the ≤1-day completeness lag** — predicting "fire within 2–3 d of `t`" still
+  covers today+tomorrow even when forced onto a 1-day-stale `t`, so it stays **true forecasting on a stale
+  label**. Dual win (skill + operational robustness); serve a risk curve alongside the t+1 head.
 
 ## 2026-06-26 — `fgdc-forecast-features`: forecast weather PROVEN (+CAPE), calendar DROPPED, baseline floors, v1 cubes deleted
 
