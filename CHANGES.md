@@ -53,7 +53,10 @@ and prediction sharpen. `daily_job.latest_complete_fire_date()` becomes a *preli
 today-vs-tomorrow switch. The ~35% the night pass misses skew small/daytime/human-ignited → softer on the
 **new-ignition** regime, robust on **spread** (whose `dist_to_fire` keys off the big persistent fires the night pass
 catches). Built `extend_cube.serve_edge` (ephemeral: forecast + cube-tail seed → `compute_edge_engineered`, NO cube
-write) as the serve engine; live test pending an Open-Meteo quota reset (was 429-rate-limited; fetch now batched).
+write) + wired `daily_job --mode live` → **first real tomorrow-risk prediction produced** (2026-06-28→06-29, stamped
+`live-prelim`; ~80 s/run). *Bugs fixed:* `fetch_openmeteo` **ignored the `OPENMETEO_API_KEY` in `.env`** (free tier →
+429 on large forecast requests) — now uses the **commercial endpoint + apikey** (also speeds the weekly batch
+ingest); and the FIRMS edge fetch is **windowed to ≤5 days** (the area-API `day_range` cap, "Expects [1..5]").
 
 ## 2026-06-27 — `fgdc-serving`: monthly batch job + the silver-rebuild path made real (static preserved, regridder fixed)
 

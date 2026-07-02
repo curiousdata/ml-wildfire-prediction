@@ -174,6 +174,35 @@ def show():
                   f"max={r.max_prob:.3f} exp_cells={r.expected_count:.1f} alerts={r.n_alert}")
 
 
+def serve_live(date_arg, alert_thr):
+    """Progressive-refinement live serve: predict t+1 from TODAY's forecast+NRT edge via the ephemeral serve
+    engine (extend_cube.serve_edge — fetch forecast/NRT, seed from the cube tail, compute engineered, NO cube
+    write). Stamped PRELIMINARY until today's afternoon SNPP pass settles (~17 UTC); re-running later refines
+    (overwrites the logged prediction). See the `fire-label-timing` memory."""
+    import logging
+    import scripts.extend_cube as EC
+    log = logging.getLogger("daily_job")
+    now = datetime.now(timezone.utc)
+    t = date_arg or now.date().isoformat()                          # predict from TODAY's edge (partial fire ok)
+    issue, fields = EC.serve_edge(CUBE, t)
+    z, gbt, feats, calib, land, ccaa, dyn_set, stat_vals = _load()
+    if fields is None:                                              # t already settled in the cube → replay it
+        i = int(np.where(pd.DatetimeIndex(z["time"].values).date == _dt.date.fromisoformat(issue))[0][0])
+        predict_day(z, i, gbt, feats, calib, land, ccaa, dyn_set, stat_vals, alert_thr, True, "live-settled")
+        return
+    X = np.stack([fields[f][land] if f in dyn_set else stat_vals[f] for f in feats], -1)
+    p = gbt.predict_proba(X)[:, 1]
+    p = calib.predict(p) if calib is not None else p
+    reg_land = np.where(fields["dist_to_fire"][land] <= REGIME_KM, 2, 1).astype(np.int8)
+    today_fire = (fields["is_fire"] > 0.5).astype(np.float32)
+    target = str((pd.Timestamp(issue) + pd.Timedelta(days=1)).date())
+    prelim = (issue == now.date().isoformat()) and (now.hour < FIRMS_AFTERNOON_SETTLE_UTC)
+    tag = "live-prelim" if prelim else "live"
+    _log(issue, target, p, reg_land, X, today_fire, feats, land, ccaa, gbt, alert_thr, tag)
+    log.info(f"LIVE [{tag}]: issue {issue} → predict {target} "
+             f"({'PRELIMINARY (today afternoon pass not settled)' if prelim else 'fire complete'})")
+
+
 def main():
     import logging
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -188,10 +217,7 @@ def main():
     if args.show:
         show(); return
     if args.mode == "live":
-        raise SystemExit("--mode live = the no-cold-start append loop (fetch feeds → append cube → recompute "
-                         "engineered over a trailing window → predict). Not built yet (phase B). When built, gate "
-                         f"the issue date on latest_complete_fire_date() — t complete only after its ~13:30 UTC "
-                         f"afternoon SNPP pass settles (~{FIRMS_AFTERNOON_SETTLE_UTC}:00 UTC); else predict from yesterday.")
+        serve_live(args.date, args.alert_thr); show(); return
 
     z, gbt, feats, calib, land, ccaa, dyn_set, stat_vals = _load()
     times = pd.DatetimeIndex(z["time"].values)

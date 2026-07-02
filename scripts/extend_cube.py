@@ -35,23 +35,34 @@ FETCH_STEP = 0.25                                    # native ~0.25°
 
 
 def _band_raw(z, band, gx, gy):
-    """Raw dynamic fields for the forecast band → {var: (n_band, NY, NX)}. Weather=forecast, fire=NRT (both fetched
-    as a SINGLE range request — not per-day — to stay under Open-Meteo/FIRMS rate limits), everything else (veg,
-    GHS, and engineered placeholders) CARRIED from the cube's last row (the engine overwrites the engineered, and
-    veg/GHS are slow-varying so carry-forward is the right estimate for a ≤7-day edge)."""
+    """Raw dynamic fields for the edge band → {var: (n_band, NY, NX)}. Weather from the Open-Meteo **ARCHIVE**
+    (free endpoint, seamless to ~today — the recent ~5 d are IFS-model-filled), fire=FIRMS NRT (both fetched as a
+    SINGLE range request — not per-day — to stay under rate limits), everything else (veg, GHS, and engineered
+    placeholders) CARRIED from the cube's last row (the engine overwrites the engineered; veg/GHS are slow-varying
+    so carry-forward is the right estimate for a ≤~5 d edge). Archive (not forecast) because the model predicts
+    t+1 from TODAY's features — today's weather is in the archive — so serve needs NO commercial forecast key, and
+    it matches the product family the batch later settles (better train/serve consistency)."""
     import os
     import scripts.fetch_firms as FB
     gold_time = [v for v in z.data_vars if "time" in z[v].dims]
     last = {v: z[v].isel(time=-1).values for v in gold_time}
     start, end = band[0].date().isoformat(), band[-1].date().isoformat()
-    # ONE forecast-weather range fetch + ONE precip range fetch (whole band)
-    plon, plat, hv, times = OM.fetch_grid_hourly_range(start, end, IW.HOURLY_VARS, step=FETCH_STEP, source="forecast")
-    _, _, dly, _ = OM.fetch_grid_range(start, end, ["precipitation_sum"], step=FETCH_STEP, source="forecast")
+    # ONE archive-weather range fetch + ONE precip range fetch (whole band; seamless-to-today, free endpoint)
+    plon, plat, hv, times = OM.fetch_grid_hourly_range(start, end, IW.HOURLY_VARS, step=FETCH_STEP, source="archive")
+    _, _, dly, _ = OM.fetch_grid_range(start, end, ["precipitation_sum"], step=FETCH_STEP, source="archive")
     rg = OM.make_regridder(np.asarray(plon, float), np.asarray(plat, float), gx, gy)
     precip = dly["precipitation_sum"]                                # (n_band, n_pts)
-    # ONE FIRMS NRT range fetch (whole band), split per acq_date
+    # FIRMS NRT in ≤5-day windows (the area API caps day_range at 5), concat, split per acq_date
     key = os.getenv("FIRMS_MAP_KEY")
-    fdf = IF._filter_conf(FB.fetch_firms(key, start, src=IF.SRC_NRT, bbox=IF.BBOX_LL, days=len(band))) if key else None
+    fdf = None
+    if key:
+        bd = [d.date() for d in band]
+        parts, i = [], 0
+        while i < len(bd):
+            w = min(5, len(bd) - i)
+            parts.append(IF._filter_conf(FB.fetch_firms(key, bd[i].isoformat(), src=IF.SRC_NRT, bbox=IF.BBOX_LL, days=w)))
+            i += w
+        fdf = pd.concat([p for p in parts if p is not None and not p.empty], ignore_index=True) if parts else None
 
     raw = {v: np.empty((len(band), len(gy), len(gx)), np.float32) for v in gold_time}
     for k, d in enumerate(band):
@@ -77,17 +88,22 @@ def serve_edge(cube_path=CUBE, t=None):
     t = pd.Timestamp(t)
     if t <= cube_last:
         log.info(f"serve: {t.date()} already settled in cube — predict from cube row"); return str(t.date()), None
+    import time
     band = pd.date_range(cube_last + pd.Timedelta(days=1), t)
     n = len(band); i0 = z.sizes["time"]
-    log.info(f"serve: forecast band {band[0].date()}..{band[-1].date()} ({n}d) after settled {cube_last.date()}")
+    log.info(f"serve: forecast band {band[0].date()}..{band[-1].date()} ({n}d) after settled {cube_last.date()} — fetching")
+    tf = time.time()
     raw = _band_raw(z, band, gx, gy)
+    log.info(f"  band raw fetched ({time.time()-tf:.0f}s); running engine")
     gold_time = list(raw.keys())
     band_ds = xr.Dataset({v: (("time", "y", "x"), raw[v]) for v in gold_time},
                          coords={"time": band, "y": z["y"], "x": z["x"]})
     z_ext = xr.concat([z[gold_time], band_ds], dim="time")            # virtual cube: history + forecast band
     for sv in [v for v in z.data_vars if "time" not in z[v].dims]:
         z_ext[sv] = z[sv]
+    te = time.time()
     eng = UE.compute_edge_engineered(z_ext, i0, n)                   # engineered over the band (ephemeral)
+    log.info(f"  engine done ({time.time()-te:.0f}s)")
     jt = n - 1                                                        # day t = last band index
     fields = {v: (eng[v][jt] if v in eng else raw[v][jt]) for v in gold_time}
     return str(t.date()), fields

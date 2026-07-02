@@ -58,7 +58,10 @@ from src.data.ingest import ingest_fire as IF
 from src.data.ingest import ingest_veg as IV
 
 GOLD = PROJECT / "data" / "gold" / "FireGuard_coarse4.zarr"
-WATERMARK_DAYS = 7                 # default: ERA5-Land settled (≥5 d) with margin
+WATERMARK_DAYS = 6                 # ERA5T settle edge (~5 d) with 1 d safety margin. TODO (Delta 1): make this
+                                   # data-driven — probe the archive (models=era5, which GAPS at the ERA5T edge)
+                                   # for the last non-NaN day; fall back to this fixed value. Blocked on a
+                                   # quota-available test of that gap behavior (the seamless archive fills to today).
 FIRE_ARCHIVE_LAG_DAYS = 60         # FIRMS VIIRS SP archive horizon; newer than this → NRT
 FACTOR = 4
 log = logging.getLogger("batch_job")
