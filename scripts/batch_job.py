@@ -12,8 +12,8 @@ raw day is cached as an npz that `build_silver` reads. So the batch job is:
 
   1. TOP UP BRONZE with the new SETTLED days (weather=Open-Meteo/ERA5, fire=FIRMS VIIRS, veg=MODIS/MPC),
      up to the watermark where the reanalysis/archive feeds are final.
-  2. EXTEND the medallion — silver (1 km) → gold (4 km, coarsen_fgdc) → engineered (add_engineered_features +
-     add_fire_context, whole-cube):
+  2. EXTEND the medallion — silver (1 km) → gold (4 km, coarsen_fgdc) → engineered (build_features:
+     fire_context THEN engineered, whole-cube):
        * silver = **incremental APPEND** of just the new settled days (`build_silver --append`); ~10 s for a
          weekly window vs ~47 min for a full re-regrid of 14 yr. `--full` forces the one-time whole-rebuild
          baseline (e.g. first run, or after a schema change).
@@ -173,10 +173,9 @@ def main():
     if args.full:                                          # one-time baseline: whole-cube coarsen + engineered (heavy)
         if not args.skip_gold:
             _run("gold-full", [py, "-m", "src.data.ingest.coarsen_fgdc", "--factor", str(FACTOR), "--overwrite"])
-        if not args.skip_engineered:
-            for script in ("add_fire_context.py", "add_engineered_features.py"):   # fire_context FIRST (makes precip_sum_*)
-                _run("engineered", [py, str(PROJECT / "scripts" / script),
-                                    "--cube", "FireGuard", "--factor", str(FACTOR), "--overwrite"])
+        if not args.skip_engineered:                       # one ordered pass (fire_context THEN engineered)
+            _run("engineered", [py, str(PROJECT / "scripts" / "build_features.py"),
+                                "--cube", "FireGuard", "--factor", str(FACTOR), "--overwrite"])
     elif not (args.skip_gold and args.skip_engineered):    # weekly: coarsen ONLY new days + engineer via edge
         _run("gold-edge", [py, str(PROJECT / "scripts" / "update_edge.py"), "--run", "--to", target_end])
 
