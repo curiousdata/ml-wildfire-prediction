@@ -1,19 +1,13 @@
-"""Fire Guard — wildfire control center (operational live view).
+"""Fire Guard Control Center — dark, map-first live view of next-day wildfire risk for Spain.
 
-The main application: a live forest-fire control center for Spain. Not a date-picker demo — it shows the
-LATEST prediction the engine produced and is built to feel operational.
+Design: the map is the hero — a full-width dark schematic base (CartoDB dark_matter: place names + borders,
+no imagery) with tomorrow's risk rendered as a smooth, day-stable yellow→red glow, and today's active fire as
+crisp cyan. Below it: a compact sources/freshness line and two translucent cards (NOW | TOMORROW). The only
+saturated colours on the page are the prediction itself.
 
-Architecture: the engine is `scripts/daily_job.py --mode live` (fetch Open-Meteo + FIRMS → assemble slice →
-GBT → write date-partitioned store under data/serving_store/). THIS app READS the latest stored prediction
-(fast, no in-app rate-limited fetch) and renders it. Liveness is handled by st.fragment:
-  • a 1s fragment redraws the clock + per-feed "age" counters WITHOUT re-rendering the heavy map;
-  • a 10s fragment watches the store and triggers a full rerun only when a NEW prediction lands
-    (so no manual page reload — and no repeated st_folium re-render, which was crashing the process).
-
-Panels: a fresh daily-satellite map (NASA GIBS true-color, dated) with today's fires + tomorrow's risk;
-LIVE FEEDS strip (each feed + its own freshness timer); NOW burning; TOMORROW risk; TOP DRIVERS per regime.
-
-Run: streamlit run docker/monolith/app_live.py
+This app only READS the latest published prediction (HF Dataset, Ship A; local store fallback) and renders it —
+no cube, no model, no rate-limited fetch. A 10 s fragment swaps in a new prediction when one lands; a 60 s
+fragment refreshes the "updated" stamp.
 """
 from __future__ import annotations
 import base64
@@ -27,60 +21,56 @@ import folium
 import numpy as np
 import streamlit as st
 import streamlit.components.v1 as components
-from PIL import Image
+from PIL import Image, ImageFilter
 from pyproj import Transformer
 
-# Deployable Space build: reads predictions from a local store + precomputed display assets (CCAA grid +
-# x/y coords) — NO zarr cube, NO torch, NO model at runtime. The engine (scripts/daily_job.py, run by a
-# scheduler) writes new grids into store/; this app only renders the latest. See space/README.md.
 ROOT = Path(__file__).resolve().parent
-# Read predictions from the persistent bucket (/data, written by the scheduled engine) once it has any;
-# until then fall back to the seed prediction bundled in the repo so the Space renders immediately.
 STORE = Path("/data") if (Path("/data") / "grids").exists() else ROOT / "store"
 ASSETS = ROOT / "display_assets.npz"
-# Ship A: the LOCAL engine (scripts/daily_job.py) publishes each prediction to an HF Dataset via
-# scripts/push_serving.py; this Space READS that Dataset — poll the tiny latest.json manifest, and pull the
-# referenced grid only when it changes. Falls back to the local STORE if HF is unreachable. Set
-# FIREGUARD_LOCAL_STORE=1 to force the local store (local dev). See the `hf-deploy-plan` memory.
 SERVING_REPO = os.getenv("FIREGUARD_SERVING_REPO", "curiousdata/fireguard-serving")
 FORCE_LOCAL = os.getenv("FIREGUARD_LOCAL_STORE") == "1"
-CELL_HA = 4.0 * 4.0 * 100   # 4 km cell = 16 km² = 1600 ha
 CELL_KM2 = 16.0
-HIGH, ELEV, MOD = 0.50, 0.20, 0.05    # calibrated-probability risk tiers
+HIGH, ELEV, MOD = 0.50, 0.20, 0.05    # calibrated-probability ALERT tiers (text panel bands)
+# Map colour ramp = LOG scale over the calibrated-probability dynamic range. Per-cell next-day probs are tiny and
+# heavy-tailed (prevalence ≈ 7e-4; median ~1e-4, p99 ~4e-3, rare cells → 0.6), so a LINEAR ramp anchored to the
+# alert tiers shows almost nothing. Log-ramp from RAMP_FLOOR (≈3× prevalence; below → transparent so quiet days
+# stay dark) to RAMP_CAP (≈100× prevalence → full red). Absolute → comparable across days.
+RAMP_FLOOR, RAMP_CAP = 0.002, 0.03    # CAP low so the (tiny-valued) field spans into red, not stalling at yellow
+_LF = float(np.log(RAMP_FLOOR)); _LS = float(np.log(RAMP_CAP) - np.log(RAMP_FLOOR))
+BAND_COLOR = {"High": "#ef4444", "Elevated": "#f59e0b", "Moderate": "#eab308", "Low": "#4ade80"}
 CCAA = {1: "Andalucía", 2: "Aragón", 3: "Asturias", 4: "Baleares", 6: "Cantabria",
         7: "Castilla y León", 8: "Castilla-La Mancha", 9: "Cataluña", 10: "C. Valenciana",
         11: "Extremadura", 12: "Galicia", 13: "Madrid", 14: "Murcia", 15: "Navarra",
         16: "País Vasco", 17: "La Rioja"}
 
-# human-readable feature names for the "top drivers" panel
 PRETTY = {
-    "dist_to_fire": "Proximity to active fire", "time_since_last_fire": "Time since last fire",
-    "burn_frequency_365d": "Recent burn frequency", "fire_upwind_exposure": "Upwind fire exposure",
-    "dist_to_roads_stdev": "Road-network variability", "dist_to_roads_mean": "Distance to roads",
+    "dist_to_fire": "proximity to active fire", "time_since_last_fire": "time since last fire",
+    "burn_frequency_365d": "recent burn frequency", "fire_upwind_exposure": "upwind fire exposure",
+    "dist_to_roads_stdev": "road-network variability", "dist_to_roads_mean": "distance to roads",
     "precip_sum_7d": "7-day rainfall", "precip_sum_30d": "30-day rainfall", "precip_sum_90d": "90-day rainfall",
-    "days_since_rain": "Days since rain", "spi_90d": "Standardized precip (SPI-90)", "kbdi": "Drought index (KBDI)",
-    "total_precipitation_mean": "Rainfall", "t2m_max": "Max temperature", "t2m_mean": "Mean temperature",
-    "t2m_min": "Min temperature", "t2m_range": "Temperature range", "wind_speed_max": "Max wind",
-    "wind_speed_mean": "Mean wind", "ffwi": "Fosberg fire-weather index", "ffwi_max": "Fosberg FWI",
-    "fwi": "Fire Weather Index", "hdw": "Hot-Dry-Windy index", "vpd_peak": "Vapour-pressure deficit (peak)",
-    "vpd_mean": "Vapour-pressure deficit", "emc_peak": "Fuel moisture (EMC)", "rh_min": "Min humidity",
-    "rh_mean": "Mean humidity", "rh_max": "Max humidity", "ndvi": "Greenness (NDVI)",
-    "ndvi_anomaly": "Greenness anomaly", "lai": "Leaf-area index", "lai_anomaly": "Leaf-area anomaly",
-    "fapar": "Canopy light absorption", "fvc": "Vegetation cover", "lst": "Land-surface temperature",
-    "swi_001": "Soil moisture (0–1cm)", "swi_005": "Soil moisture", "swi_010": "Soil moisture",
-    "surface_pressure_mean": "Surface pressure", "elevation": "Elevation", "slope": "Slope",
+    "days_since_rain": "days since rain", "spi_90d": "standardized precip (SPI-90)", "kbdi": "drought index (KBDI)",
+    "total_precipitation_mean": "rainfall", "t2m_max": "max temperature", "t2m_mean": "mean temperature",
+    "t2m_min": "min temperature", "t2m_range": "temperature range", "wind_speed_max": "max wind",
+    "wind_speed_mean": "mean wind", "ffwi": "Fosberg fire-weather index", "ffwi_max": "Fosberg FWI",
+    "fwi": "Fire Weather Index", "hdw": "hot-dry-windy index", "vpd_peak": "vapour-pressure deficit",
+    "vpd_mean": "vapour-pressure deficit", "emc_peak": "fuel moisture (EMC)", "rh_min": "min humidity",
+    "rh_mean": "mean humidity", "rh_max": "max humidity", "ndvi": "greenness (NDVI)",
+    "ndvi_anomaly": "greenness anomaly", "lai": "leaf-area index", "lai_anomaly": "leaf-area anomaly",
+    "fapar": "canopy light absorption", "fvc": "vegetation cover", "lst": "land-surface temperature",
+    "swi_001": "soil moisture", "swi_005": "soil moisture", "swi_010": "soil moisture",
+    "surface_pressure_mean": "surface pressure", "elevation": "elevation", "slope": "slope",
 }
 
 
 def pretty(f):
-    return PRETTY.get(f, PRETTY.get(f.lower(), f.replace("_", " ").capitalize()))
+    return PRETTY.get(f, PRETTY.get(f.lower(), f.replace("_", " ")))
 
 
 def risk_band(p):
-    return ("High", "🔴") if p >= HIGH else ("Elevated", "🟠") if p >= ELEV else \
-           ("Moderate", "🟡") if p >= MOD else ("Low", "🟢")
+    return "High" if p >= HIGH else "Elevated" if p >= ELEV else "Moderate" if p >= MOD else "Low"
 
 
+# ---------- store reading (HF Dataset first, local fallback) ----------
 @st.cache_resource(show_spinner=False)
 def load_ccaa():
     return np.load(ASSETS)["ccaa"].astype(int)
@@ -96,7 +86,6 @@ def load_importance():
 
 
 def _unpack_grid(d, *, issue=None, target=None, source=None, mtime=None, prelim=False):
-    """Common npz → view dict, tolerating older grids that lack some keys."""
     def _j(key):
         try:
             return json.loads(str(d[key])) if key in d else ([] if key == "refreshed" else {})
@@ -112,7 +101,6 @@ def _unpack_grid(d, *, issue=None, target=None, source=None, mtime=None, prelim=
 
 @st.cache_data(ttl=8, show_spinner=False)
 def _hf_manifest():
-    """Poll the tiny latest.json manifest (cheap — cached 8s so the 1s/10s fragments don't hammer HF)."""
     from huggingface_hub import hf_hub_download
     p = hf_hub_download(SERVING_REPO, "latest.json", repo_type="dataset")
     return json.loads(Path(p).read_text())
@@ -120,8 +108,6 @@ def _hf_manifest():
 
 @st.cache_data(show_spinner=False)
 def _grid_view(grid_path, version, issue, target, source, prelim):
-    """Download + unpack the grid, cached by (path, version) so full reruns don't re-fetch or re-load until the
-    published prediction actually changes (store_watcher clears the cache when pushed_at moves)."""
     from huggingface_hub import hf_hub_download
     g = hf_hub_download(SERVING_REPO, grid_path, repo_type="dataset")
     return _unpack_grid(np.load(g, allow_pickle=True), issue=issue, target=target,
@@ -129,7 +115,6 @@ def _grid_view(grid_path, version, issue, target, source, prelim):
 
 
 def _hf_latest(man):
-    """Pull the grid the manifest points at (cached by pushed_at → only re-downloads when it changes)."""
     return _grid_view(man["grid_path"], man.get("pushed_at"), man.get("issue"), man.get("target"),
                       man.get("source", "?"), man.get("prelim", False))
 
@@ -143,7 +128,6 @@ def _local_latest():
 
 
 def latest_version():
-    """Cheap 'has anything changed?' token for the store-watcher: the manifest's pushed_at (HF) or grid mtime."""
     if not FORCE_LOCAL:
         try:
             m = _hf_manifest()
@@ -156,14 +140,13 @@ def latest_version():
 
 
 def latest_store():
-    """Latest published prediction — HF Dataset first (Ship A), local store as fallback."""
     if not FORCE_LOCAL:
         try:
             m = _hf_manifest()
             if m:
                 return _hf_latest(m)
         except Exception:
-            pass                                          # HF unreachable / empty → local
+            pass
     return _local_latest()
 
 
@@ -190,20 +173,29 @@ def gather(a, idx):
     return np.where(idx >= 0, f[np.clip(idx, 0, f.size - 1)], np.nan).astype(np.float32)
 
 
-def risk_rgba(prob, amax=210, eps=1e-4):
+def risk_rgba(prob):
+    """LOG-scaled, prevalence-anchored ramp. Per-cell probs span ~1e-4→0.6, so colour position is log(p): below
+    RAMP_FLOOR (≈3× prevalence) → transparent (quiet days & the noise floor stay dark); RAMP_FLOOR→RAMP_CAP
+    log-ramps yellow→orange→red. Absolute (comparable across days) but reveals the whole heavy-tailed field, so a
+    genuinely-elevated day lights up instead of clipping to black (the linear tier-anchored ramp did the latter)."""
     p = np.clip(np.nan_to_num(prob), 0, 1)
-    d = float(np.percentile(p[p > 0], 99)) if (p > 0).any() else 0.0
-    ps = np.clip(p / d, 0, 1) if d > 0 else p
+    with np.errstate(divide="ignore"):
+        t = np.clip((np.log(np.maximum(p, 1e-12)) - _LF) / _LS, 0.0, 1.0)   # 0 at FLOOR, 1 at CAP (log position)
+    Y = np.array([255, 176, 32.]); O = np.array([255, 88, 8.]); R = np.array([244, 33, 28.])  # amber→orange-red→red
+    lo = (t < 0.5)[..., None]; f = np.where(t < 0.5, t * 2, (t - 0.5) * 2)[..., None]
+    rgb = np.where(lo, Y, O) * (1 - f) + np.where(lo, O, R) * f
+    a = np.where(p > RAMP_FLOOR, np.clip(80 + 160 * (t ** 0.5), 0, 240), 0.0)   # opaque field (drama); dark below floor
     rgba = np.zeros((*p.shape, 4), np.uint8)
-    rgba[..., 0] = 255; rgba[..., 1] = ((1 - ps) * 200).astype(np.uint8)
-    rgba[..., 3] = np.where(p > eps, np.clip(ps * amax, 25, amax), 0).astype(np.uint8)
+    rgba[..., :3] = rgb.astype(np.uint8); rgba[..., 3] = a.astype(np.uint8)
     return rgba
 
 
 def fire_rgba(mask):
-    m = np.asarray(mask) > 0.5; rgba = np.zeros((*m.shape, 4), np.uint8)
-    rgba[..., 0] = np.where(m, 255, 0); rgba[..., 2] = np.where(m, 255, 0)
-    rgba[..., 3] = np.where(m, 255, 0).astype(np.uint8)
+    """Active-fire cells → crisp bright cyan (distinct from the yellow-red risk on a dark base)."""
+    m = np.asarray(mask) > 0.5
+    rgba = np.zeros((*m.shape, 4), np.uint8)
+    rgba[..., 0] = np.where(m, 150, 0); rgba[..., 1] = np.where(m, 245, 0)
+    rgba[..., 2] = np.where(m, 255, 0); rgba[..., 3] = np.where(m, 255, 0)
     return rgba
 
 
@@ -219,23 +211,36 @@ def png(rgba):
     bf = io.BytesIO(); Image.fromarray(rgba, "RGBA").save(bf, "PNG"); return bf.getvalue()
 
 
+def _legend(issue, target):
+    return f'''<div style="position:absolute;bottom:18px;left:18px;z-index:9999;
+      background:rgba(13,17,23,.80);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+      border:1px solid rgba(255,255,255,.09);border-radius:11px;padding:11px 13px;
+      font-family:'Inter',system-ui,-apple-system,sans-serif;color:#c9d4e0;">
+      <div style="font-size:10.5px;letter-spacing:.07em;color:#8b98a8;margin-bottom:6px;text-transform:uppercase;">
+        Risk for {target}</div>
+      <div style="height:8px;width:156px;border-radius:4px;
+        background:linear-gradient(90deg,rgba(255,232,74,.12),#ffe84a 18%,#ff8c00 60%,#dc1a1a);"></div>
+      <div style="display:flex;justify-content:space-between;width:156px;font-size:10px;color:#7d8aa0;margin-top:3px;">
+        <span>low</span><span>high</span></div>
+      <div style="margin-top:8px;font-size:11px;color:#8b98a8;">
+        <span style="color:#96f5ff;font-size:13px;">■</span> burning now · issued {issue}</div>
+    </div>'''
+
+
 @st.cache_data(show_spinner=False)
-def build_map_html(prob_bytes, fire_bytes, shape, gibs_date, _idxmap, _bounds):
-    """Build the folium map once and cache its HTML (keyed by the prediction arrays + date)."""
+def build_map_html(prob_bytes, fire_bytes, shape, issue, target, _idxmap, _bounds):
+    """Build the folium map once and cache its HTML. Dark schematic base + tier-anchored risk glow + cyan fire."""
     prob = np.frombuffer(prob_bytes, np.float32).reshape(shape)
     fire = np.frombuffer(fire_bytes, np.float32).reshape(shape)
     (la0, lo0), (la1, lo1) = _bounds
-    m = folium.Map(location=[(la0 + la1) / 2, (lo0 + lo1) / 2], zoom_start=6, tiles=None,
-                   control_scale=True)
-    folium.TileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-                     attr="Esri", name="Satellite (static)").add_to(m)
-    gibs = (f"https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_SNPP_CorrectedReflectance_TrueColor/"
-            f"default/{gibs_date}/GoogleMapsCompatible_Level9/{{z}}/{{y}}/{{x}}.jpg")
-    folium.TileLayer(gibs, attr="NASA GIBS / VIIRS", name=f"🛰 Fresh imagery {gibs_date}", overlay=False).add_to(m)
+    m = folium.Map(location=[(la0 + la1) / 2, (lo0 + lo1) / 2], zoom_start=6, tiles="cartodbdark_matter",
+                   zoom_control=True, control_scale=False)
     pr = gather(prob, _idxmap); fr = np.nan_to_num(gather(fire, _idxmap))
-    layer = alpha_over(risk_rgba(pr), fire_rgba(fr > 0.5))
+    risk = np.array(Image.fromarray(risk_rgba(pr)).filter(ImageFilter.GaussianBlur(0.8)))   # tight glow, keeps punch
+    layer = alpha_over(risk, fire_rgba(fr > 0.5))                                            # fire stays crisp on top
     url = "data:image/png;base64," + base64.b64encode(png(layer)).decode()
-    folium.raster_layers.ImageOverlay(image=url, bounds=[[la0, lo0], [la1, lo1]], opacity=0.85, zindex=2).add_to(m)
+    folium.raster_layers.ImageOverlay(image=url, bounds=[[la0, lo0], [la1, lo1]], opacity=0.96, zindex=2).add_to(m)
+    m.get_root().html.add_child(folium.Element(_legend(issue, target)))
     return m._repr_html_()
 
 
@@ -245,7 +250,7 @@ def regions_of(mask, ccaa):
 
 
 def ago(iso_or_mtime):
-    """Human 'time ago' from an ISO-UTC string or a unix mtime float."""
+    """Human 'time ago' at MINUTE granularity (no ticking seconds)."""
     if iso_or_mtime is None:
         return "—"
     try:
@@ -258,8 +263,8 @@ def ago(iso_or_mtime):
     except Exception:
         return "—"
     s = (datetime.now(timezone.utc) - t).total_seconds()
-    if s < 90:
-        return f"{int(s)}s ago"
+    if s < 120:
+        return "just now"
     if s < 5400:
         return f"{int(s // 60)}m ago"
     if s < 172800:
@@ -268,14 +273,29 @@ def ago(iso_or_mtime):
 
 
 # ---------------------------- UI ----------------------------
-st.set_page_config(page_title="Fire Guard — wildfire control center", page_icon="🛡️", layout="wide")
+st.set_page_config(page_title="Fire Guard Control Center", page_icon="🛡️", layout="wide")
 st.markdown("""<style>
-  .feed-card{background:#11151c;border:1px solid #2a3340;border-radius:12px;padding:12px 16px;height:100%;}
-  .feed-name{font-size:0.95rem;color:#9fb3c8;font-weight:600;letter-spacing:.02em;}
-  .feed-val{font-size:1.45rem;font-weight:700;color:#e8eef5;line-height:1.25;margin:2px 0;}
-  .feed-age{font-size:0.9rem;color:#7d8aa0;}
-  .big-num{font-size:2.6rem;font-weight:800;line-height:1;}
-  .sub{font-size:0.95rem;color:#9fb3c8;}
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
+  html, body, [class*="css"] { font-family:'Inter',system-ui,-apple-system,sans-serif; }
+  .stApp { background:#0d1117; }
+  .block-container { padding-top:1.1rem; padding-bottom:1rem; max-width:1400px; }
+  iframe { border-radius:14px; }
+  .fg-title { font-size:1.7rem; font-weight:800; color:#eef2f7; letter-spacing:-.01em; line-height:1.05; }
+  .fg-sub { font-size:.82rem; color:#7d8aa0; margin-top:3px; letter-spacing:.03em; }
+  .fg-status { text-align:right; font-size:1.05rem; font-weight:700; line-height:1.1; }
+  .fg-status-age { display:block; font-size:.8rem; color:#7d8aa0; font-weight:400; margin-top:3px; }
+  .src-k { font-size:.68rem; text-transform:uppercase; letter-spacing:.06em; color:#6f7d90; }
+  .src-v { font-size:.9rem; color:#c9d4e0; font-weight:600; }
+  .card { background:rgba(22,27,34,.55); backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+          border:1px solid rgba(255,255,255,.06); border-radius:16px; padding:18px 22px; height:100%; }
+  .card-h { font-size:.74rem; text-transform:uppercase; letter-spacing:.09em; color:#8b98a8; margin-bottom:10px; }
+  .metric { font-size:2.9rem; font-weight:800; line-height:1; color:#eef2f7; }
+  .metric-band { font-size:2.2rem; font-weight:800; line-height:1; }
+  .metric-sub { font-size:.92rem; color:#9fb3c8; margin-top:6px; }
+  .rowline { font-size:.9rem; color:#c9d4e0; margin-top:8px; }
+  .muted { color:#7d8aa0; }
+  .drivers { font-size:.86rem; color:#9fb3c8; margin-top:12px; padding-top:11px; border-top:1px solid rgba(255,255,255,.06); }
+  .foot { color:#5f6b7d; font-size:.78rem; }
 </style>""", unsafe_allow_html=True)
 
 ccaa = load_ccaa()
@@ -283,160 +303,98 @@ idxmap, bounds = reproj_index()
 importance = load_importance()
 S = latest_store()
 if not S:
-    st.markdown("## 🛡️ Fire Guard")
-    st.warning("No prediction in the store yet — the scheduled engine hasn't published one. Check back shortly.")
+    st.markdown("<div class='fg-title'>Fire Guard Control Center</div>", unsafe_allow_html=True)
+    st.warning("No prediction published yet — the engine hasn't produced one. Check back shortly.")
     st.stop()
-st.session_state["seen_version"] = latest_version()   # baseline for the store-watcher fragment
+st.session_state["seen_version"] = latest_version()
 
 prob, regime, fire = S["prob"], S["regime"], S["today_fire"]
 land = regime > 0
-# FGDC v2 has NO warm-start and NO EFFIS: every prediction is built from live sources (Open-Meteo ERA5 weather +
-# FIRMS VIIRS fire + live-derived dryness; veg carried from the latest MODIS composite). `source` is the only real
-# state — a live forecast edge vs a replayed settled cube day; both are real data. (The old v1 `refreshed`-token
-# warm-start/EFFIS/legacy chrome is retired here.)
-src = S.get("source", "?")
-is_live = src.startswith("live")                       # live / live-prelim / live-settled (vs "replay")
+prelim = S.get("prelim")
+n_fire = int((fire > 0.5).sum())
 
 
-# ---------- header: branding + LIVE + clock (auto-ticking) ----------
-@st.fragment(run_every=1)
-def header_live():
-    c1, c2, c3 = st.columns([3, 2, 2])
-    c1.markdown("## 🛡️ Fire Guard\n###### wildfire control center · Spain")
-    prelim = S.get("prelim")
-    dot = "◐ PRELIMINARY" if prelim else "● LIVE"
-    color = "#f0a020" if prelim else "#ff4b4b"
-    c2.markdown(f"<div class='feed-name'>STATUS</div>"
-                f"<div class='feed-val' style='color:{color}'>{dot}</div>"
-                f"<div class='feed-age'>updated {ago(S['fetched_at'] or S['mtime'])}"
-                f"{' · refines after ~17 UTC' if prelim else ''}</div>",
-                unsafe_allow_html=True)
-    now = datetime.now()
-    c3.markdown(f"<div class='feed-name'>NOW (LOCAL)</div>"
-                f"<div class='feed-val' style='font-variant-numeric:tabular-nums'>{now.strftime('%H:%M:%S')}</div>"
-                f"<div class='feed-age'>{now.strftime('%A %d %b %Y')}</div>", unsafe_allow_html=True)
+# ---------- title + status (60 s refresh for the 'updated' stamp; no ticking clock) ----------
+@st.fragment(run_every=60)
+def topbar():
+    c1, c2 = st.columns([4, 2])
+    c1.markdown("<div class='fg-title'>Fire Guard <span style='color:#9fb3c8;font-weight:700'>Control Center</span></div>"
+                "<div class='fg-sub'>next-day wildfire risk · Spain</div>", unsafe_allow_html=True)
+    dot, col = ("◐ PRELIMINARY", "#f0a020") if prelim else ("● LIVE", "#4ade80")
+    c2.markdown(f"<div class='fg-status' style='color:{col}'>{dot}"
+                f"<span class='fg-status-age'>updated {ago(S['fetched_at'] or S['mtime'])}"
+                f"{' · refines ~17 UTC' if prelim else ''}</span></div>", unsafe_allow_html=True)
 
 
-header_live()
+topbar()
+
+# ---------- MAP: full-width hero ----------
+html = build_map_html(np.ascontiguousarray(prob, np.float32).tobytes(),
+                      np.ascontiguousarray(fire, np.float32).tobytes(), prob.shape,
+                      S["issue"], S["target"], idxmap, bounds)
+components.html(html, height=620)
 
 
-# ---------- LIVE FEEDS strip: each feed + its own freshness timer (auto-ticking) ----------
-@st.fragment(run_every=1)
-def live_feeds():
-    n_fire = int((fire > 0.5).sum())
-    asof = f"as of {ago(S['fetched_at'] or S['mtime'])}"
-    feeds = [
-        ("🛰 Satellite", "NASA GIBS true-color", f"imagery {S['issue']}"),
-        ("🌡 Weather", "Open-Meteo (ERA5)" if is_live else "ERA5 reanalysis", asof),
-        ("🔥 Active fire", f"FIRMS VIIRS · {n_fire} cells", asof),
-        ("🌵 Dryness", "live antecedents · KBDI/SPI/precip", asof),
-        ("🌿 Vegetation", "MODIS · latest composite", "weekly cadence"),
-    ]
-    cols = st.columns(len(feeds))
-    for col, (name, val, age) in zip(cols, feeds):
-        col.markdown(f"<div class='feed-card'><div class='feed-name'>{name}</div>"
-                     f"<div class='feed-val'>{val}</div><div class='feed-age'>{age}</div></div>",
-                     unsafe_allow_html=True)
-
-
-live_feeds()
-st.write("")
-
-
-# ---------- store-watcher: full rerun only when a NEW prediction lands (no manual reload) ----------
+# ---------- store-watcher: full rerun only when a NEW prediction lands ----------
 @st.fragment(run_every=10)
 def store_watcher():
     v = latest_version()
     if v is not None and v != st.session_state.get("seen_version"):
-        st.cache_data.clear()   # drop the cached manifest + map so the rerun pulls the new grid
-        st.rerun()  # full rerun: reload store + rebuild map
+        st.cache_data.clear()
+        st.rerun()
 
 
 store_watcher()
 
-# (v2 has no warm-start / EFFIS inputs to caveat — the one genuine caveat, morning-preliminary vs settled, is the
-# ◐ PRELIMINARY status badge in the header. The old v1 "degraded inputs" banner is retired.)
+# ---------- sources & freshness (compact, below the map) ----------
+asof = ago(S["fetched_at"] or S["mtime"])
+srcs = [("Weather", "Open-Meteo ERA5"), ("Active fire", f"FIRMS VIIRS · {n_fire} cells"),
+        ("Dryness", "live KBDI / SPI"), ("Vegetation", "MODIS composite")]
+scols = st.columns([1, 1, 1, 1, 1])
+for col, (k, v) in zip(scols, srcs):
+    col.markdown(f"<div class='src-k'>{k}</div><div class='src-v'>{v}</div>", unsafe_allow_html=True)
+scols[-1].markdown(f"<div class='src-k' style='text-align:right'>freshness</div>"
+                   f"<div class='src-v' style='text-align:right'>updated {asof}</div>", unsafe_allow_html=True)
+st.write("")
 
+# ---------- NOW | TOMORROW ----------
+cN, cT = st.columns(2)
 
-# ---------- map (rendered ONCE; cached; not redrawn by the 1s fragments) ----------
-left, right = st.columns([3, 2])
-with left:
-    st.caption(f"Issued **{S['issue']}** → risk for **{S['target']}** · 🟪 burning now · 🟧 predicted risk "
-               f"(intensity ∝ calibrated probability) · 🛰 fresh VIIRS true-color base")
-    html = build_map_html(np.ascontiguousarray(prob, np.float32).tobytes(),
-                          np.ascontiguousarray(fire, np.float32).tobytes(), prob.shape,
-                          S["issue"], idxmap, bounds)
-    components.html(html, height=600)
-
-with right:
-    # ---- NOW burning ----
-    n_fire = int((fire > 0.5).sum())
+with cN:
     now_regions = regions_of(fire, ccaa)
-    st.subheader("🔥 Burning now")
     if n_fire:
-        st.markdown(f"<span class='big-num' style='color:#c026d3'>{n_fire}</span> "
-                    f"<span class='sub'>cells with active fire</span>", unsafe_allow_html=True)
-        st.markdown(f"<span class='sub'>footprint ≤ {n_fire * CELL_KM2:,.0f} km² "
-                    f"(~{n_fire * CELL_HA:,.0f} ha) · {', '.join(now_regions)}</span>", unsafe_allow_html=True)
-        st.caption("FIRMS flags each 4 km cell that *contains* an active-fire detection — an upper bound on "
-                   "footprint, not a measured burned-area total.")
+        reg = " · ".join(now_regions[:6]) + (" …" if len(now_regions) > 6 else "")
+        body = (f"<div class='metric' style='color:#96f5ff'>{n_fire}</div>"
+                f"<div class='metric-sub'>active-fire cells · ≤ {n_fire * CELL_KM2:,.0f} km²</div>"
+                f"<div class='rowline muted'>{reg}</div>")
     else:
-        st.success("No active-fire detections.")
+        body = "<div class='metric' style='color:#4ade80'>0</div><div class='metric-sub'>no active-fire detections</div>"
+    st.markdown(f"<div class='card'><div class='card-h'>Now — burning</div>{body}</div>", unsafe_allow_html=True)
 
-    # ---- TOMORROW ----
-    st.subheader(f"📈 Tomorrow ({S['target']})")
+with cT:
     pk = float(prob[land].max()) if land.any() else 0.0
-    band, dot = risk_band(pk)
-    exp_area = float(prob[land].sum()) * CELL_HA
-    n_contrib = int((prob[land] > 1e-4).sum())
-    st.markdown(f"<span class='big-num'>{dot} {band}</span> "
-                f"<span class='sub'>peak cell risk {pk:.1%}</span>", unsafe_allow_html=True)
-    st.markdown(f"**Expected new-fire area ≈ {exp_area:,.0f} ha** "
-                f"<span class='sub'>(Σ calibrated risk × cell area, over {n_contrib:,} cells)</span>",
-                unsafe_allow_html=True)
+    band = risk_band(pk); bcol = BAND_COLOR[band]
     rmax = {n: float(prob[(ccaa == c) & land].max()) for c, n in CCAA.items() if ((ccaa == c) & land).any()}
-    high = [n for n, v in rmax.items() if v >= HIGH]
-    elev = [n for n, v in rmax.items() if ELEV <= v < HIGH]
-    st.markdown(f"🔴 **HIGH (≥{HIGH:.0%})** in {len(high)}: " + (", ".join(high) if high else "_none_"))
-    st.markdown(f"🟠 **ELEVATED (≥{ELEV:.0%})** in {len(elev)}: " + (", ".join(elev) if elev else "_none_"))
-    # reconcile the two numbers (the "9k ha but 0 elevated — what's burning?" question)
-    if not high and not elev:
-        st.info(f"**How to read this:** “Burning now” counts fire cells observed *today*. “Expected area” is a "
-                f"*probabilistic sum for tomorrow* — not a count. Today the peak cell risk is only **{pk:.1%}**, so "
-                f"risk is **diffuse and low**: ~{exp_area:,.0f} ha of expected area spread thinly across {n_contrib:,} "
-                f"cells, with **no** single area reaching the Elevated tier (≥{ELEV:.0%}). Nothing is predicted to "
-                f"concentrate into a hotspot.")
-    st.markdown("**Top regions by risk tomorrow:**")
-    for name, v in sorted(rmax.items(), key=lambda kv: -kv[1])[:5]:
-        b, d = risk_band(v)
-        st.markdown(f"&nbsp;&nbsp;{d} {name} — {v:.1%}")
-
-    # ---- BIGGEST FACTORS driving TOMORROW's prediction (per-day attribution) ----
-    st.subheader("🧭 Biggest factors driving tomorrow")
+    tops = sorted(rmax.items(), key=lambda kv: -kv[1])[:4]
+    top_line = " · ".join(f"{n} {v:.0%}" for n, v in tops if v >= MOD) or "no elevated regions"
     drv = S.get("drivers") or {}
-    if drv:
-        ig = [d["feature"] for d in drv.get("ignition", [])][:4]
-        sp = [d["feature"] for d in drv.get("spread", [])][:4]
-        if ig:
-            st.markdown("**🔥 New ignition:** " + " · ".join(pretty(f) for f in ig))
-        if sp:
-            st.markdown("**🌬 Spread (existing fire):** " + " · ".join(pretty(f) for f in sp))
-        if not ig and not sp:
-            st.caption("Risk is flat today — no feature is pushing the highest-risk cells up meaningfully.")
-        st.caption("What actually pushed *this day's* highest-risk cells up: each feature zeroed to its "
-                   "baseline → mean predicted-risk drop (occlusion attribution, per regime).")
-    elif importance:  # fallback: model-wide general drivers
-        ig = importance.get("ignition", [])[:4]; sp = importance.get("spread", [])[:4]
-        if ig:
-            st.markdown("**🔥 New ignition:** " + " · ".join(pretty(f) for f in ig))
-        if sp:
-            st.markdown("**🌬 Spread (existing fire):** " + " · ".join(pretty(f) for f in sp))
-        st.caption("⚠️ Showing model-wide *general* drivers (this prediction predates per-day attribution — "
-                   "re-run the engine for today-specific factors).")
-    else:
-        st.caption("Driver attribution not available yet.")
+    ig = [pretty(d["feature"]) for d in drv.get("ignition", [])][:3]
+    sp = [pretty(d["feature"]) for d in drv.get("spread", [])][:3]
+    if not (ig or sp) and importance:
+        ig = [pretty(f) for f in importance.get("ignition", [])[:3]]
+        sp = [pretty(f) for f in importance.get("spread", [])[:3]]
+    drv_html = ""
+    if ig:
+        drv_html += f"<div class='drivers'><span class='muted'>ignition drivers</span> · {' · '.join(ig)}</div>"
+    if sp:
+        drv_html += f"<div class='drivers' style='border-top:none;padding-top:2px'><span class='muted'>spread drivers</span> · {' · '.join(sp)}</div>"
+    st.markdown(
+        f"<div class='card'><div class='card-h'>Tomorrow · {S['target']}</div>"
+        f"<div class='metric-band' style='color:{bcol}'>{band}</div>"
+        f"<div class='metric-sub'>peak cell risk {pk:.0%}</div>"
+        f"<div class='rowline'>top regions · {top_line}</div>{drv_html}</div>", unsafe_allow_html=True)
 
-st.caption("Engine: point-wise calibrated gradient-boosted trees (Fire Guard Datacube v2) on the 4 km grid. "
-           "Live inputs — Open-Meteo ERA5 weather · FIRMS VIIRS active fire · live-derived drought/dryness "
-           "(KBDI/SPI/precip); vegetation from the latest MODIS composite (weekly cadence). Predictions refine "
-           "through the day: preliminary in the morning, final after the afternoon satellite pass settles (~17 UTC).")
+st.write("")
+st.markdown("<div class='foot'>Calibrated gradient-boosted trees on the Fire Guard Datacube v2 · "
+            "preliminary in the morning, final after the afternoon satellite pass (~17 UTC) · "
+            "base © CARTO / OpenStreetMap.</div>", unsafe_allow_html=True)

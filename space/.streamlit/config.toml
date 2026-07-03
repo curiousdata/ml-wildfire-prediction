@@ -1,0 +1,11 @@
+# Fire Guard Control Center — dark, map-first theme.
+[theme]
+base = "dark"
+backgroundColor = "#0d1117"
+secondaryBackgroundColor = "#161b22"
+textColor = "#c9d4e0"
+primaryColor = "#ff8c00"
+font = "sans serif"
+
+[server]
+headless = true
