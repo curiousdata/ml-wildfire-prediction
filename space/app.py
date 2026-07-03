@@ -35,7 +35,7 @@ HIGH, ELEV, MOD = 0.50, 0.20, 0.05    # calibrated-probability ALERT tiers (text
 # heavy-tailed (prevalence ≈ 7e-4; median ~1e-4, p99 ~4e-3, rare cells → 0.6), so a LINEAR ramp anchored to the
 # alert tiers shows almost nothing. Log-ramp from RAMP_FLOOR (≈3× prevalence; below → transparent so quiet days
 # stay dark) to RAMP_CAP (≈100× prevalence → full red). Absolute → comparable across days.
-RAMP_FLOOR, RAMP_CAP = 0.0013, 0.02   # low FLOOR = more visible cells; low CAP = field spans into red (dramatic)
+RAMP_FLOOR, RAMP_CAP = 0.0013, 0.012  # FLOOR = pixel count; CAP low so the field runs hot into red (dramatic)
 _LF = float(np.log(RAMP_FLOOR)); _LS = float(np.log(RAMP_CAP) - np.log(RAMP_FLOOR))
 BAND_COLOR = {"High": "#ef4444", "Elevated": "#f59e0b", "Moderate": "#eab308", "Low": "#4ade80"}
 CCAA = {1: "Andalucía", 2: "Aragón", 3: "Asturias", 4: "Baleares", 6: "Cantabria",
@@ -189,7 +189,7 @@ def risk_rgba(prob):
     Y = np.array([255, 176, 32.]); O = np.array([255, 88, 8.]); R = np.array([244, 33, 28.])  # amber→orange-red→red
     lo = (t < 0.5)[..., None]; f = np.where(t < 0.5, t * 2, (t - 0.5) * 2)[..., None]
     rgb = np.where(lo, Y, O) * (1 - f) + np.where(lo, O, R) * f
-    a = np.where(p > RAMP_FLOOR, np.clip(95 + 145 * (t ** 0.45), 0, 240), 0.0)   # opaque field (drama); dark below floor
+    a = np.where(p > RAMP_FLOOR, np.clip(110 + 135 * (t ** 0.40), 0, 245), 0.0)   # opaque field (drama); dark below floor
     rgba = np.zeros((*p.shape, 4), np.uint8)
     rgba[..., :3] = rgb.astype(np.uint8); rgba[..., 3] = a.astype(np.uint8)
     return rgba
