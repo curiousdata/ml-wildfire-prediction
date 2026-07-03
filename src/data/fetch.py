@@ -1,26 +1,22 @@
-"""Open-Meteo weather feed — keyless, gridded, live forecast + ERA5 archive. The chosen weather source.
+"""Unified external-data fetch primitives — the live feeds' HTTP + rasterise + regrid layer.
 
-Replaces the AEMET-station path (flaky key, station→grid interpolation, distribution shift). Open-Meteo is:
-  * keyless + free (non-commercial), no signup;
-  * already GRIDDED (we query a regular lat/lon grid and bilinear-regrid to the cube — no scattered-station
-    interpolation);
-  * ERA5-based, so it MATCHES our model's training distribution (minimal train/serve shift);
-  * forecast API (live "today") + archive API (ERA5, for backfill / IberFire-v2).
+Consolidates the former `scripts/fetch_openmeteo.py` + `scripts/fetch_firms.py` (2026-07-03 refactor) into one
+`src.data`-rooted module, since these are LIBRARIES imported across the ingest + serve paths (they were reaching
+back into `scripts/` from `src/`, backwards). Two feeds:
 
-Open-Meteo daily → our feature mapping (units already match the cube: °C, mm, hPa):
-  temperature_2m_mean/min/max -> t2m_mean/min/max ; precipitation_sum -> tp ;
-  wind_speed_10m_max -> wind_speed ; wind_direction_10m_dominant -> wind_direction ;
-  (pressure / RH need hourly→daily aggregation — add when wiring the full slice).
+  * **Open-Meteo** (weather) — keyless/free, ERA5-based so it matches the model's training distribution.
+    Query a regular lat/lon grid → bilinear-regrid to the cube (EPSG:3035). Archive endpoint for backfill/serve
+    (immutable past = disk-cached; recent ~5 d revise so are never cached), forecast endpoint for live "today".
+    Commercial `OPENMETEO_API_KEY` (in .env) is FORECAST-scoped only (customer-archive → 403); archive stays free.
+  * **FIRMS** (fire) — NASA VIIRS/MODIS active-fire CSV (~3 h latency). Point detections → rasterise to the grid
+    (`fires_to_grid`) → is_fire. Needs a free `FIRMS_MAP_KEY` (env).
 
-archive:  https://archive-api.open-meteo.com/v1/archive   (start_date/end_date; ERA5)
-forecast: https://api.open-meteo.com/v1/forecast           (past_days/forecast_days)
-
-`--demo`: fetch a cube-range date from the archive, regrid t2m_mean to the cube grid, and compare to the
-cube's own t2m_mean for that date — validates the fetch→regrid produces cube-compatible features.
+(The old single-date `fetch_grid`, `dist_to_fire`, and the `--demo` self-checks were dropped in the merge — the
+demos opened the deleted v1 IberFire cube, and callers use only the range fetchers + regridder + rasteriser.
+The EFFIS burned-area fetcher moved to `archive/scripts/fetch_effis.py` — v1-legacy, offline-eval only.)
 """
 from __future__ import annotations
 import os
-import sys
 import time
 from pathlib import Path
 try:
@@ -28,29 +24,26 @@ try:
 except Exception:
     pass
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
-import xarray as xr
 from pyproj import Transformer
 from scipy.interpolate import griddata
+from scipy.ndimage import distance_transform_edt
 
-CUBE = Path(__file__).resolve().parents[1] / "data" / "gold" / "IberFire_coarse4.zarr"
-SPAIN_BBOX = (-9.5, 35.5, 4.5, 44.0)  # W, S, E, N
-# Commercial key (OPENMETEO_API_KEY in .env) is scoped to the FORECAST product only (customer-archive → 403), so
-# only the forecast endpoint uses it (higher rate limits — the free tier 429s on large hourly forecast requests).
-# ARCHIVE stays on the FREE endpoint: the key doesn't cover it, and archive responses are immutable+cached+low-
-# volume (weekly batch) so the free tier is fine. Everything degrades to free endpoints when no key is set.
+_ROOT = Path(__file__).resolve().parents[2]              # src/data/fetch.py → project root
+
+# ── Open-Meteo (weather) ────────────────────────────────────────────────────────────────────────────────────
+SPAIN_BBOX = (-9.5, 35.5, 4.5, 44.0)                     # W, S, E, N
+# Commercial key is scoped to the FORECAST product only (customer-archive → 403), so only the forecast endpoint
+# uses it; ARCHIVE stays on the FREE endpoint (immutable + cached + low-volume). Degrades to free when unset.
 OPENMETEO_KEY = os.getenv("OPENMETEO_API_KEY") or None
 ARCHIVE = "https://archive-api.open-meteo.com/v1/archive"
 FORECAST = "https://customer-api.open-meteo.com/v1/forecast" if OPENMETEO_KEY else "https://api.open-meteo.com/v1/forecast"
-DAILY_MAP = {"temperature_2m_mean": "t2m_mean", "temperature_2m_max": "t2m_max",
-             "temperature_2m_min": "t2m_min", "precipitation_sum": "tp",
-             "wind_speed_10m_max": "wind_speed", "wind_direction_10m_dominant": "wind_direction"}
-
-
-CACHE_DIR = Path(__file__).resolve().parents[1] / "data" / "cache" / "openmeteo"
+CACHE_DIR = _ROOT / "data" / "cache" / "openmeteo"
 CACHE_SAFE_DAYS = 7   # only cache archive ranges ending ≥ this old — the archive is seamless-to-today and its
                       # recent ~5 d are IFS/ERA5T-preliminary that REVISE daily (caching them would serve stale data)
+
+# ── FIRMS (fire) ────────────────────────────────────────────────────────────────────────────────────────────
+FIRMS_BASE = "https://firms.modaps.eosdis.nasa.gov/api/area/csv"
 
 
 def _cache_path(url, params):
@@ -103,39 +96,11 @@ def _get(url, params, tries=6, timeout=120, use_cache=True):
     r.raise_for_status()
 
 
-def fetch_grid(date: str, daily_vars, bbox=SPAIN_BBOX, step=0.25, source="archive", batch=100):
-    """Query Open-Meteo on a regular lat/lon grid for `date`; return (lons, lats, {var: values}).
-
-    Large batch = few requests (Open-Meteo accepts many coords/call) — the key to not getting rate-limited."""
-    w, s, e, n = bbox
-    lons = np.arange(w, e + 1e-9, step); lats = np.arange(s, n + 1e-9, step)
-    LON, LAT = np.meshgrid(lons, lats)
-    plon, plat = LON.ravel(), LAT.ravel()
-    url = ARCHIVE if source == "archive" else FORECAST
-    out = {v: np.full(plon.size, np.nan) for v in daily_vars}
-    for b0 in range(0, plon.size, batch):
-        sl = slice(b0, b0 + batch)
-        params = {"latitude": ",".join(f"{x:.4f}" for x in plat[sl]),
-                  "longitude": ",".join(f"{x:.4f}" for x in plon[sl]),
-                  "daily": ",".join(daily_vars), "timezone": "UTC"}
-        params["start_date"] = params["end_date"] = date  # forecast endpoint also serves recent past + forecast window
-        js = _get(url, params)
-        js = js if isinstance(js, list) else [js]  # multi-coord returns a list
-        for k, item in enumerate(js):
-            d = item.get("daily", {})
-            for v in daily_vars:
-                val = d.get(v, [None])
-                out[v][b0 + k] = (val[0] if val and val[0] is not None else np.nan)
-        if b0 + batch < plon.size:
-            time.sleep(1.0)  # be polite between batches
-    return plon, plat, out
-
-
 def fetch_grid_range(start: str, end: str, daily_vars, bbox=SPAIN_BBOX, step=0.5, source="archive",
                      batch=100, models=None):
-    """Like fetch_grid but for a DATE RANGE — returns (lons, lats, {var: array[n_days, n_points]}, dates).
-    The archive endpoint serves the whole [start,end] window in ONE request per coord-batch (cheap).
-    `models` (e.g. 'era5_land') selects the reanalysis model — use era5_land to match the IberFire cube."""
+    """Query Open-Meteo daily aggregates on a regular lat/lon grid for [start,end] — returns
+    (lons, lats, {var: array[n_days, n_points]}, dates). The archive endpoint serves the whole window in ONE
+    request per coord-batch (cheap). `models` (e.g. 'era5_land') selects the reanalysis model to match the cube."""
     w, s, e, n = bbox
     lons = np.arange(w, e + 1e-9, step); lats = np.arange(s, n + 1e-9, step)
     LON, LAT = np.meshgrid(lons, lats); plon, plat = LON.ravel(), LAT.ravel()
@@ -166,9 +131,8 @@ def fetch_grid_range(start: str, end: str, daily_vars, bbox=SPAIN_BBOX, step=0.5
 def fetch_grid_hourly_range(start: str, end: str, hourly_vars, bbox=SPAIN_BBOX, step=0.5, source="archive",
                             batch=60, models=None):
     """Hourly counterpart of fetch_grid_range — returns (lons, lats, {var: array[n_hours, n_points]}, times).
-    Needed for the variables Open-Meteo does NOT expose as daily aggregates (RH, surface_pressure, hourly
-    wind speed/direction → daily mean/min/max/range and at-max-speed). Smaller default batch since each
-    point returns 24×n_days values."""
+    Needed for variables Open-Meteo does NOT expose as daily aggregates (RH, surface_pressure, hourly wind
+    speed/direction → daily mean/min/max/range). Smaller default batch since each point returns 24×n_days values."""
     w, s, e, n = bbox
     lons = np.arange(w, e + 1e-9, step); lats = np.arange(s, n + 1e-9, step)
     LON, LAT = np.meshgrid(lons, lats); plon, plat = LON.ravel(), LAT.ravel()
@@ -211,15 +175,12 @@ def make_regridder(plon, plat, gx, gy, epsg=3035):
     """Precompute the source→cube interpolation ONCE and return a fast callable `f(vals) -> cube_grid`.
 
     `regrid_to_cube` rebuilds the Delaunay triangulation AND a KD-tree on every call (twice — linear+nearest).
-    In a backfill the source point set (the fixed ERA5/Open-Meteo grid) and the target (the fixed 1 km cube
-    grid) are identical for every day × feature, so all that geometry is recomputed thousands of times for
-    nothing. Here we do it once: build the triangulation, locate every cube cell in its simplex, cache the
-    barycentric weights + vertex indices (linear interp) and the nearest-neighbour index (hull-edge fill).
-    Each subsequent regrid is then a gather + weighted-sum — O(cells), not O(triangulate). Turns the
-    per-feature cost from ~hundreds of ms into ~tens of ms.
-
-    Assumes the SAME finite source points for every call (true for ERA5 reanalysis over our box — no NaNs).
-    If a value vector contains NaN it transparently falls back to the scattered `regrid_to_cube`."""
+    In a backfill the source point set (fixed ERA5/Open-Meteo grid) and the target (fixed cube grid) are identical
+    for every day × feature, so all that geometry is recomputed for nothing. Here we do it once: build the
+    triangulation, locate every cube cell in its simplex, cache the barycentric weights + vertex indices (linear
+    interp) and the nearest-neighbour index (hull-edge fill). Each subsequent regrid is a gather + weighted-sum —
+    O(cells), not O(triangulate). Assumes the SAME finite source points every call (true for ERA5 over our box);
+    a value vector with NaN transparently falls back to the scattered `regrid_to_cube`."""
     from scipy.spatial import Delaunay, cKDTree
     tx, ty = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg}", always_xy=True).transform(plon, plat)
     src = np.column_stack([np.asarray(tx, float), np.asarray(ty, float)])
@@ -249,36 +210,46 @@ def make_regridder(plon, plat, gx, gy, epsg=3035):
     return regrid
 
 
-def demo():
-    import logging
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-    log = logging.getLogger("fetch_openmeteo.demo")
-    z = xr.open_zarr(str(CUBE), consolidated=True)
-    cube_var = next((v for v in ["t2m_mean"] if v in z), None)
-    date = "2024-07-15"  # cube-range, in archive
-    gx = z["x"].values.astype(float); gy = z["y"].values.astype(float)
-    t0 = time.time()
-    plon, plat, vals = fetch_grid(date, ["temperature_2m_mean"], step=0.5, source="archive")
-    log.info(f"fetched {plon.size} Open-Meteo grid points for {date} in {time.time()-t0:.1f}s "
-             f"({np.isfinite(vals['temperature_2m_mean']).sum()} valid)")
-    grid = regrid_to_cube(plon, plat, vals["temperature_2m_mean"], gx, gy)
-    if cube_var:
-        truth = z[cube_var].sel(time=date).values.astype(float)
-        land = np.isfinite(truth)
-        err = np.abs(grid[land] - truth[land])
-        log.info(f"Open-Meteo regridded t2m_mean vs cube '{cube_var}' ({date}): "
-                 f"MAE={err.mean():.3f}°C median={np.median(err):.3f} corr={np.corrcoef(grid[land], truth[land])[0,1]:.4f}")
-        log.info("  → fetch+regrid produces cube-compatible features (both ERA5-based); this IS the live weather slice.")
-    else:
-        log.info(f"grid built {grid.shape}; cube t2m var not found for direct comparison.")
+def fetch_firms(map_key: str, date: str, src: str = "VIIRS_SNPP_NRT", bbox=(-10.0, 35.0, 5.0, 44.5),
+                days: int = 1, tries: int = 5):
+    """Fetch active-fire detections for the bbox (W,S,E,N) starting at `date` for `days` days (FIRMS area API
+    caps day_range at 5); return DataFrame. `src` selects sensor+latency, e.g. VIIRS_SNPP_NRT (recent) or
+    VIIRS_SNPP_SP (standard-processing archive, 2012-01-20→). Needs FIRMS_MAP_KEY. Retries on transient errors."""
+    import io as _io
+    import time as _t
+    import pandas as pd
+    import requests
+    w, s, e, n = bbox
+    url = f"{FIRMS_BASE}/{map_key}/{src}/{w},{s},{e},{n}/{int(days)}/{date}"
+    for i in range(tries):
+        try:
+            r = requests.get(url, timeout=90)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+            _t.sleep(min(2 ** i * 4, 45)); continue
+        if r.status_code == 429 or r.status_code >= 500:
+            _t.sleep(min(2 ** i * 4, 45)); continue
+        r.raise_for_status()
+        txt = r.text
+        if txt.lstrip().lower().startswith(("invalid", "error")) or "Invalid MAP_KEY" in txt[:200]:
+            raise RuntimeError(f"FIRMS error: {txt[:120]}")
+        return pd.read_csv(_io.StringIO(txt))
+    raise RuntimeError("FIRMS unavailable after retries")
 
 
-def main():
-    if "--demo" in sys.argv:
-        demo(); return
-    print("Use as a module: fetch_grid(date, vars, source='forecast'|'archive') + regrid_to_cube(...).", file=sys.stderr)
-    print("Run --demo to validate the fetch+regrid chain against the cube.", file=sys.stderr)
+def fires_to_grid(lons, lats, gx, gy, epsg=3035):
+    """Rasterise detection points (lon/lat) onto the cube grid → binary is_fire[H,W]."""
+    H, W = len(gy), len(gx); dx = (gx[-1] - gx[0]) / (W - 1); dy = (gy[-1] - gy[0]) / (H - 1)
+    tx, ty = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg}", always_xy=True).transform(np.asarray(lons), np.asarray(lats))
+    col = np.rint((np.asarray(tx) - gx[0]) / dx).astype(int)
+    row = np.rint((np.asarray(ty) - gy[0]) / dy).astype(int)
+    ok = (col >= 0) & (col < W) & (row >= 0) & (row < H)
+    fire = np.zeros((H, W), np.float32); fire[row[ok], col[ok]] = 1.0
+    return fire
 
 
-if __name__ == "__main__":
-    main()
+def dist_to_fire(fire, cell_km=4.0):
+    """Distance (km) from each cell to the nearest fire cell (EDT on the binary fire mask). (Kept as a small
+    reusable primitive; the cube's dist_to_fire FEATURE is built via feature_engineering.fire_distance_and_exposure.)"""
+    if fire.sum() == 0:
+        return np.full(fire.shape, np.inf, np.float32)
+    return (distance_transform_edt(fire == 0) * cell_km).astype(np.float32)

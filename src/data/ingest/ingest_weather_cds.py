@@ -53,7 +53,7 @@ ARCO_WORKERS = 16
 
 from src.data.ingest import grid
 from src.data.ingest import ingest_weather as IW
-import scripts.fetch_openmeteo as OM
+from src.data import fetch as OM
 import src.data.feature_engineering as FE
 
 log = logging.getLogger("ingest_weather_cds")

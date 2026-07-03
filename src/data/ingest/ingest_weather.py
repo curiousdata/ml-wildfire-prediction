@@ -27,7 +27,7 @@ import datetime as _dt
 import os
 import numpy as np
 
-import scripts.fetch_openmeteo as OM
+from src.data import fetch as OM
 import src.data.feature_engineering as FE
 from src.data.ingest import grid
 

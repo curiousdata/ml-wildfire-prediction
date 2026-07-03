@@ -31,7 +31,7 @@ from src.data.ingest import ingest_weather as IW
 from src.data.ingest import ingest_fire as IF
 from src.data.ingest import ingest_veg as IV
 from src.data.ingest import ingest_static as IS
-import scripts.fetch_openmeteo as OM
+from src.data import fetch as OM
 
 SILVER = grid.ROOT / "data" / "silver" / "FireGuard.zarr"
 STATIC_STORE = grid.ROOT / "data" / "silver" / "FireGuard_static.zarr"   # preserved 1 km static (see _load_static)

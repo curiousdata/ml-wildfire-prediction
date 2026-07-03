@@ -10,8 +10,8 @@ rows to gold) — no provisional cube state to reconcile.
 `serve_edge(cube, t)` → `(issue_date, {var: grid[NY,NX]})` of day t's raw+engineered fields (None if t is already
 in the settled cube → caller predicts from the cube row). `daily_job --mode live` calls it, predicts, logs.
 
-Reuse: `scripts.fetch_openmeteo` + `ingest_weather.daily_point_features` (forecast weather → 4 km),
-`scripts.fetch_firms`/`ingest_fire` (NRT fire → 4 km), `update_edge.compute_edge_engineered` (the one engine).
+Reuse: `src.data.fetch` (Open-Meteo + FIRMS) + `ingest_weather.daily_point_features` (forecast weather → 4 km),
+`ingest_fire` (NRT fire → 4 km), `update_edge.compute_edge_engineered` (the one engine).
 NB: a live serve hits the network (Open-Meteo forecast + FIRMS NRT). Veg/GHS are slow → carried, not fetched.
 """
 from __future__ import annotations
@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-import scripts.fetch_openmeteo as OM
+from src.data import fetch as OM
 import scripts.update_edge as UE
 from src.data.ingest import grid
 from src.data.ingest import ingest_weather as IW
@@ -43,7 +43,7 @@ def _band_raw(z, band, gx, gy):
     t+1 from TODAY's features — today's weather is in the archive — so serve needs NO commercial forecast key, and
     it matches the product family the batch later settles (better train/serve consistency)."""
     import os
-    import scripts.fetch_firms as FB
+    from src.data import fetch as FB
     gold_time = [v for v in z.data_vars if "time" in z[v].dims]
     last = {v: z[v].isel(time=-1).values for v in gold_time}
     start, end = band[0].date().isoformat(), band[-1].date().isoformat()
