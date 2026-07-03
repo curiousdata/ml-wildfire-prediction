@@ -19,6 +19,7 @@ forecast: https://api.open-meteo.com/v1/forecast           (past_days/forecast_d
 cube's own t2m_mean for that date — validates the fetch→regrid produces cube-compatible features.
 """
 from __future__ import annotations
+import os
 import sys
 import time
 from pathlib import Path
@@ -35,22 +36,35 @@ from scipy.interpolate import griddata
 
 CUBE = Path(__file__).resolve().parents[1] / "data" / "gold" / "IberFire_coarse4.zarr"
 SPAIN_BBOX = (-9.5, 35.5, 4.5, 44.0)  # W, S, E, N
+# Commercial key (OPENMETEO_API_KEY in .env) is scoped to the FORECAST product only (customer-archive → 403), so
+# only the forecast endpoint uses it (higher rate limits — the free tier 429s on large hourly forecast requests).
+# ARCHIVE stays on the FREE endpoint: the key doesn't cover it, and archive responses are immutable+cached+low-
+# volume (weekly batch) so the free tier is fine. Everything degrades to free endpoints when no key is set.
+OPENMETEO_KEY = os.getenv("OPENMETEO_API_KEY") or None
 ARCHIVE = "https://archive-api.open-meteo.com/v1/archive"
-FORECAST = "https://api.open-meteo.com/v1/forecast"
+FORECAST = "https://customer-api.open-meteo.com/v1/forecast" if OPENMETEO_KEY else "https://api.open-meteo.com/v1/forecast"
 DAILY_MAP = {"temperature_2m_mean": "t2m_mean", "temperature_2m_max": "t2m_max",
              "temperature_2m_min": "t2m_min", "precipitation_sum": "tp",
              "wind_speed_10m_max": "wind_speed", "wind_direction_10m_dominant": "wind_direction"}
 
 
 CACHE_DIR = Path(__file__).resolve().parents[1] / "data" / "cache" / "openmeteo"
+CACHE_SAFE_DAYS = 7   # only cache archive ranges ending ≥ this old — the archive is seamless-to-today and its
+                      # recent ~5 d are IFS/ERA5T-preliminary that REVISE daily (caching them would serve stale data)
 
 
 def _cache_path(url, params):
-    """Disk-cache key for a request. ARCHIVE responses are IMMUTABLE historical ERA5 (a past date's reanalysis
-    never changes), so caching them is correctness-safe AND it dodges the free-tier 429 wall on repeated
-    backfills/backtests. Forecast responses change daily → never cached (returns None)."""
+    """Disk-cache key for a request. OLD archive days are IMMUTABLE ERA5 (a past date's reanalysis is stable), so
+    caching them is correctness-safe AND dodges the free-tier 429 wall on repeated backfills/backtests. But the
+    archive is seamless-to-today and its RECENT ~5 d are IFS/ERA5T-preliminary that revise daily → never cache a
+    range reaching within CACHE_SAFE_DAYS of today. Forecast responses also never cached (returns None)."""
     if not url.startswith(ARCHIVE):
         return None
+    end = params.get("end_date")
+    if end:
+        import datetime as _d
+        if (_d.date.today() - _d.date.fromisoformat(str(end))).days < CACHE_SAFE_DAYS:
+            return None
     import hashlib
     import json
     key = hashlib.sha1((url + json.dumps(params, sort_keys=True, default=str)).encode()).hexdigest()
@@ -66,10 +80,12 @@ def _get(url, params, tries=6, timeout=120, use_cache=True):
     cp = _cache_path(url, params) if use_cache else None
     if cp is not None and cp.exists():
         return json.loads(cp.read_text())
+    # apikey only on the (commercial) customer forecast endpoint — archive is free + would 403 with the key
+    req_params = {**params, "apikey": OPENMETEO_KEY} if (OPENMETEO_KEY and "customer-" in url) else params
     last_exc = None
     for i in range(tries):
         try:
-            r = requests.get(url, params=params, timeout=timeout)
+            r = requests.get(url, params=req_params, timeout=timeout)
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
             last_exc = e; time.sleep(min(2 ** i * 5, 60)); continue
         if r.status_code == 429 or r.status_code >= 500:

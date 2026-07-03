@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -37,6 +38,12 @@ ROOT = Path(__file__).resolve().parent
 # until then fall back to the seed prediction bundled in the repo so the Space renders immediately.
 STORE = Path("/data") if (Path("/data") / "grids").exists() else ROOT / "store"
 ASSETS = ROOT / "display_assets.npz"
+# Ship A: the LOCAL engine (scripts/daily_job.py) publishes each prediction to an HF Dataset via
+# scripts/push_serving.py; this Space READS that Dataset — poll the tiny latest.json manifest, and pull the
+# referenced grid only when it changes. Falls back to the local STORE if HF is unreachable. Set
+# FIREGUARD_LOCAL_STORE=1 to force the local store (local dev). See the `hf-deploy-plan` memory.
+SERVING_REPO = os.getenv("FIREGUARD_SERVING_REPO", "curiousdata/fireguard-serving")
+FORCE_LOCAL = os.getenv("FIREGUARD_LOCAL_STORE") == "1"
 CELL_HA = 4.0 * 4.0 * 100   # 4 km cell = 16 km² = 1600 ha
 CELL_KM2 = 16.0
 HIGH, ELEV, MOD = 0.50, 0.20, 0.05    # calibrated-probability risk tiers
@@ -88,29 +95,76 @@ def load_importance():
     return {r: [t["feature"] for t in v["top"]] for r, v in d.get("regimes", {}).items()}
 
 
-def latest_store():
+def _unpack_grid(d, *, issue=None, target=None, source=None, mtime=None, prelim=False):
+    """Common npz → view dict, tolerating older grids that lack some keys."""
+    def _j(key):
+        try:
+            return json.loads(str(d[key])) if key in d else ([] if key == "refreshed" else {})
+        except Exception:
+            return [] if key == "refreshed" else {}
+    return dict(prob=d["prob"], regime=d["regime"], today_fire=d["today_fire"],
+                issue=issue or str(d["issue_date"]), target=target or str(d["target_date"]),
+                source=source or (str(d["source"]) if "source" in d else "?"),
+                refreshed=_j("refreshed"),
+                fetched_at=str(d["fetched_at"]) if "fetched_at" in d else None,
+                drivers=_j("drivers"), prelim=prelim, mtime=mtime)
+
+
+@st.cache_data(ttl=8, show_spinner=False)
+def _hf_manifest():
+    """Poll the tiny latest.json manifest (cheap — cached 8s so the 1s/10s fragments don't hammer HF)."""
+    from huggingface_hub import hf_hub_download
+    p = hf_hub_download(SERVING_REPO, "latest.json", repo_type="dataset")
+    return json.loads(Path(p).read_text())
+
+
+@st.cache_data(show_spinner=False)
+def _grid_view(grid_path, version, issue, target, source, prelim):
+    """Download + unpack the grid, cached by (path, version) so full reruns don't re-fetch or re-load until the
+    published prediction actually changes (store_watcher clears the cache when pushed_at moves)."""
+    from huggingface_hub import hf_hub_download
+    g = hf_hub_download(SERVING_REPO, grid_path, repo_type="dataset")
+    return _unpack_grid(np.load(g, allow_pickle=True), issue=issue, target=target,
+                        source=source, mtime=version, prelim=prelim)
+
+
+def _hf_latest(man):
+    """Pull the grid the manifest points at (cached by pushed_at → only re-downloads when it changes)."""
+    return _grid_view(man["grid_path"], man.get("pushed_at"), man.get("issue"), man.get("target"),
+                      man.get("source", "?"), man.get("prelim", False))
+
+
+def _local_latest():
     grids = sorted((STORE / "grids").glob("*.npz"))
     if not grids:
         return None
     g = grids[-1]
-    d = np.load(g, allow_pickle=True)
-    refreshed = []
-    if "refreshed" in d:
+    return _unpack_grid(np.load(g, allow_pickle=True), mtime=g.stat().st_mtime)
+
+
+def latest_version():
+    """Cheap 'has anything changed?' token for the store-watcher: the manifest's pushed_at (HF) or grid mtime."""
+    if not FORCE_LOCAL:
         try:
-            refreshed = json.loads(str(d["refreshed"]))
+            m = _hf_manifest()
+            if m:
+                return m.get("pushed_at") or m.get("issue")
         except Exception:
-            refreshed = []
-    fetched = str(d["fetched_at"]) if "fetched_at" in d else None
-    drivers = {}
-    if "drivers" in d:
+            pass
+    grids = sorted((STORE / "grids").glob("*.npz"))
+    return grids[-1].stat().st_mtime if grids else None
+
+
+def latest_store():
+    """Latest published prediction — HF Dataset first (Ship A), local store as fallback."""
+    if not FORCE_LOCAL:
         try:
-            drivers = json.loads(str(d["drivers"]))
+            m = _hf_manifest()
+            if m:
+                return _hf_latest(m)
         except Exception:
-            drivers = {}
-    return dict(prob=d["prob"], regime=d["regime"], today_fire=d["today_fire"],
-               issue=str(d["issue_date"]), target=str(d["target_date"]),
-               source=str(d["source"]) if "source" in d else "?", refreshed=refreshed,
-               fetched_at=fetched, drivers=drivers, mtime=g.stat().st_mtime)
+            pass                                          # HF unreachable / empty → local
+    return _local_latest()
 
 
 # ---------- map rendering ----------
@@ -232,19 +286,16 @@ if not S:
     st.markdown("## 🛡️ Fire Guard")
     st.warning("No prediction in the store yet — the scheduled engine hasn't published one. Check back shortly.")
     st.stop()
-st.session_state["seen_mtime"] = S["mtime"]   # baseline for the store-watcher fragment
+st.session_state["seen_version"] = latest_version()   # baseline for the store-watcher fragment
 
 prob, regime, fire = S["prob"], S["regime"], S["today_fire"]
 land = regime > 0
-rfr = S["refreshed"]
-weather_live = any(k in rfr for k in ("t2m_mean", "t2m_max", "t2m_min"))
-dryness_live = "antecedent-dryness" in rfr
-firms_disp = "display:FIRMS" in rfr
-effis_live = "fire:EFFIS-live" in rfr
-effis_persist = next((str(x).split(":")[-1] for x in rfr if str(x).startswith("fire:EFFIS-persist")), None)
-effis_none = any(str(x).startswith("fire:none") for x in rfr)
-# legacy stores: "fire:EFFIS-down→warm-cube" was the old (phantom) seasonal warm-start
-effis_legacy_warm = any(str(x).startswith("fire:EFFIS-down") for x in rfr)
+# FGDC v2 has NO warm-start and NO EFFIS: every prediction is built from live sources (Open-Meteo ERA5 weather +
+# FIRMS VIIRS fire + live-derived dryness; veg carried from the latest MODIS composite). `source` is the only real
+# state — a live forecast edge vs a replayed settled cube day; both are real data. (The old v1 `refreshed`-token
+# warm-start/EFFIS/legacy chrome is retired here.)
+src = S.get("source", "?")
+is_live = src.startswith("live")                       # live / live-prelim / live-settled (vs "replay")
 
 
 # ---------- header: branding + LIVE + clock (auto-ticking) ----------
@@ -252,8 +303,13 @@ effis_legacy_warm = any(str(x).startswith("fire:EFFIS-down") for x in rfr)
 def header_live():
     c1, c2, c3 = st.columns([3, 2, 2])
     c1.markdown("## 🛡️ Fire Guard\n###### wildfire control center · Spain")
-    c2.markdown(f"<div class='feed-name'>STATUS</div><div class='feed-val' style='color:#ff4b4b'>● LIVE</div>"
-                f"<div class='feed-age'>data updated {ago(S['fetched_at'] or S['mtime'])}</div>",
+    prelim = S.get("prelim")
+    dot = "◐ PRELIMINARY" if prelim else "● LIVE"
+    color = "#f0a020" if prelim else "#ff4b4b"
+    c2.markdown(f"<div class='feed-name'>STATUS</div>"
+                f"<div class='feed-val' style='color:{color}'>{dot}</div>"
+                f"<div class='feed-age'>updated {ago(S['fetched_at'] or S['mtime'])}"
+                f"{' · refines after ~17 UTC' if prelim else ''}</div>",
                 unsafe_allow_html=True)
     now = datetime.now()
     c3.markdown(f"<div class='feed-name'>NOW (LOCAL)</div>"
@@ -268,19 +324,13 @@ header_live()
 @st.fragment(run_every=1)
 def live_feeds():
     n_fire = int((fire > 0.5).sum())
+    asof = f"as of {ago(S['fetched_at'] or S['mtime'])}"
     feeds = [
-        ("🛰 Satellite", "NASA GIBS true-color", f"imagery {S['issue']} · {ago(S['issue'] + 'T12:00:00+00:00')}"),
-        ("🌡 Weather", "Open-Meteo (ERA5)" if weather_live else "warm-started",
-         (f"as of {ago(S['fetched_at'] or S['mtime'])}") if weather_live else "seasonal"),
-        ("🔥 Active fire", f"FIRMS · {n_fire} cells" if firms_disp else f"{n_fire} cells",
-         f"as of {ago(S['fetched_at'] or S['mtime'])}" if firms_disp else "—"),
-        ("🟥 Burned area",
-         "EFFIS (live)" if effis_live else f"EFFIS (persisted)" if effis_persist else
-         "no live fire" if effis_none else "seasonal (legacy)",
-         f"as of {S['issue']}" if effis_live else f"as of {effis_persist}" if effis_persist else
-         "all-ignition" if effis_none else "stale"),
-        ("🌿 Dryness/veg", "Open-Meteo 90-day" if dryness_live else "warm-started",
-         "live antecedents" if dryness_live else "seasonal"),
+        ("🛰 Satellite", "NASA GIBS true-color", f"imagery {S['issue']}"),
+        ("🌡 Weather", "Open-Meteo (ERA5)" if is_live else "ERA5 reanalysis", asof),
+        ("🔥 Active fire", f"FIRMS VIIRS · {n_fire} cells", asof),
+        ("🌵 Dryness", "live antecedents · KBDI/SPI/precip", asof),
+        ("🌿 Vegetation", "MODIS · latest composite", "weekly cadence"),
     ]
     cols = st.columns(len(feeds))
     for col, (name, val, age) in zip(cols, feeds):
@@ -296,30 +346,16 @@ st.write("")
 # ---------- store-watcher: full rerun only when a NEW prediction lands (no manual reload) ----------
 @st.fragment(run_every=10)
 def store_watcher():
-    grids = sorted((STORE / "grids").glob("*.npz"))
-    if grids and grids[-1].stat().st_mtime != st.session_state.get("seen_mtime"):
-        st.cache_data.clear()
+    v = latest_version()
+    if v is not None and v != st.session_state.get("seen_version"):
+        st.cache_data.clear()   # drop the cached manifest + map so the rerun pulls the new grid
         st.rerun()  # full rerun: reload store + rebuild map
 
 
 store_watcher()
 
-# ---------- degraded-input banner (never show phantom/stale risk uncaveated) ----------
-degraded = []
-if effis_persist:
-    degraded.append(f"**Model fire is persisted from {effis_persist}** (live EFFIS unavailable) — fire geography "
-                    "is the most recent KNOWN state, not necessarily today's. Spread-risk assumes persistence.")
-elif effis_none:
-    degraded.append("**No live burned-area** (EFFIS down, no cache yet) — the model assumes **no known fire** "
-                    "(all-ignition); any active fire on the map (FIRMS) is not yet fed to spread-risk.")
-elif effis_legacy_warm:
-    degraded.append("**Model fire is seasonally warm-started (legacy)** — may import prior-year fire locations "
-                    "and fabricate spread-risk. Re-run the engine to use the persistence cascade.")
-if not dryness_live:
-    degraded.append("**Antecedent dryness is warm-started** (live daily precip unavailable for the most recent "
-                    "days) — drought/rainfall features are seasonal, not current.")
-if degraded:
-    st.warning("⚠️ **Degraded inputs — read risk with care:**\n\n" + "\n".join(f"- {x}" for x in degraded))
+# (v2 has no warm-start / EFFIS inputs to caveat — the one genuine caveat, morning-preliminary vs settled, is the
+# ◐ PRELIMINARY status badge in the header. The old v1 "degraded inputs" banner is retired.)
 
 
 # ---------- map (rendered ONCE; cached; not redrawn by the 1s fragments) ----------
@@ -400,7 +436,7 @@ with right:
     else:
         st.caption("Driver attribution not available yet.")
 
-st.caption("Engine: point-wise calibrated GBT on the IberFire coarse4 grid. ⚠️ Live now: temperature + "
-           "antecedent dryness (Open-Meteo) + active fire (FIRMS, display) + model fire (EFFIS-consistent). "
-           "Vegetation & some aggregates are seasonally warm-started — see CHANGES.md “Known live-serving "
-           "inconsistencies”. Absolute risk tightens as the full live pipeline lands.")
+st.caption("Engine: point-wise calibrated gradient-boosted trees (Fire Guard Datacube v2) on the 4 km grid. "
+           "Live inputs — Open-Meteo ERA5 weather · FIRMS VIIRS active fire · live-derived drought/dryness "
+           "(KBDI/SPI/precip); vegetation from the latest MODIS composite (weekly cadence). Predictions refine "
+           "through the day: preliminary in the morning, final after the afternoon satellite pass settles (~17 UTC).")

@@ -10,6 +10,123 @@ current dated entry — what was wrong, its impact, and the fix (or that it's fl
 
 ---
 
+## 2026-06-28 — `fgdc-serving`: architecture settled — batch / speed / serve along a data-VINTAGE axis
+
+Worked the Lambda mapping with the user until it clicked. The classic batch/speed split is about *compute
+latency over identical data*; **ours is a data-VINTAGE gradient** — a calendar day's data MATURES
+forecast→ERA5T→final. That reframes everything into **three tiers, one cube, two writers** (see the
+`lambda-architecture-fgdc` memory):
+
+- **BATCH** (monthly; the TRUE batch — **not built**): best data only, **final ERA5 + FIRMS SP** (~2–3 mo lag).
+  Re-fetches and **overwrites** the cube from the `final_watermark` seam to the final edge, and **recomputes the
+  recursive engineered FORWARD from the seam** (overwriting old raw re-propagates kbdi/precip_sum_*/anomalies).
+- **SPEED** (weekly/daily; = today's `batch_job.py`, a misnomer): **ERA5T** preliminary reanalysis (~5 d lag),
+  **appends** newly-settled days to the cube. Built + validated end-to-end (first real 1-day run 2026-06-21).
+- **SERVE** (on-demand; **ephemeral**): forecast + FIRMS NRT + the cube-tail *seed* (the bundle) → run
+  `compute_edge_engineered` over the forecast band → t+1 features → predict. **Writes nothing to the cube.**
+
+**Three concrete deltas this locks in:**
+1. **Data-driven settle edge.** The only freshness limiter is *weather reanalysis* — ERA5T lags ~5 d, while fire
+   (NRT) and carried veg reach today. So push the seam to the **last available ERA5T day** (query it; ~5 d), not a
+   hardcoded `WATERMARK_DAYS=7`.
+2. **`final_watermark` seam + monthly final-reanalysis batch (the missing TRUE batch).** A single cube-attr date
+   marks `≤seam`=final · `(seam, cube_edge]`=ERA5T · `>cube_edge`=forecast(serve-only). It's the batch↔speed
+   contract AND it bounds the batch's forward recompute. Append-only speed means the cube currently holds *ERA5T
+   permanently* with no path to final — this batch is what upgrades it.
+3. **Serve is ephemeral → retires Option C.** Earlier we'd planned to write *provisional forecast rows* into gold
+   and overwrite-on-settle (Option C, `extend_cube`). The cleaner model: **never persist the forecast edge** —
+   serve computes it just-in-time and discards it. The cube is then *always* authoritative-settled; the whole
+   provisional-overwrite/atomicity class of problems vanishes. `extend_cube` becomes the ephemeral serve engine,
+   reusing `update_edge`'s `compute_edge_engineered`.
+
+Naming follow-through (deferred): weekly `batch_job` is really the **speed** tier; the monthly final job is the
+**batch**. Also reviewed the incremental engine and **fixed its one real bug** (non-atomic edge write — see below)
+before it goes on a schedule.
+
+**Serving = progressive refinement (decided 2026-06-28).** Measured the question "how much fire is in hand by
+morning?" — the **night pass (~01:30 UTC, available ~morning) alone captures ~65% of a day's fire cells** (pooled
+65.8%, median 64%, IQR 58–73%; 62% of detections; 25 summer-2025 days, FIRMS SP). Surprise: the night pass has
+*more* raw detections than the afternoon (VIIRS night thermal contrast + persistent large/ag fires). So the serve
+tier **always predicts t+1 = tomorrow**, starting from a **preliminary** morning prediction (night-pass-only fire;
+weather is forecast = available) and **re-running in the evening** when the afternoon pass completes `t` — display
+and prediction sharpen. `daily_job.latest_complete_fire_date()` becomes a *preliminary-vs-final* flag, not a
+today-vs-tomorrow switch. The ~35% the night pass misses skew small/daytime/human-ignited → softer on the
+**new-ignition** regime, robust on **spread** (whose `dist_to_fire` keys off the big persistent fires the night pass
+catches). Built `extend_cube.serve_edge` (ephemeral: forecast + cube-tail seed → `compute_edge_engineered`, NO cube
+write) + wired `daily_job --mode live` → **first real tomorrow-risk prediction produced** (2026-06-28→06-29, stamped
+`live-prelim`; ~80 s/run). *Bugs fixed:* `fetch_openmeteo` **ignored the `OPENMETEO_API_KEY` in `.env`** (free tier →
+429 on large forecast requests) — now uses the **commercial endpoint + apikey** (also speeds the weekly batch
+ingest); and the FIRMS edge fetch is **windowed to ≤5 days** (the area-API `day_range` cap, "Expects [1..5]").
+
+## 2026-06-27 — `fgdc-serving`: monthly batch job + the silver-rebuild path made real (static preserved, regridder fixed)
+
+Goal: a **monthly job rolled out before Jul 15** that keeps the cube current with settled data. Designed the
+two-cadence Lambda split (see the `fgdc-extend-cadence` memory): **monthly batch** mutates silver with *settled*
+ERA5/VIIRS/MODIS (the only thing that touches silver), **daily** writes only the provisional gold edge (Option C,
+deferred). Built **`scripts/batch_job.py`** on the clean model *bronze is the source of truth → top up bronze
+with settled days, then rebuild silver→gold→engineered from it* (no append-mode/provisional logic — the back half
+is whole-cube anyway since the engineered features are causal/recursive). Per-feed watermarks: weather ERA5 ~5 d
+(margin 7), fire VIIRS ARCHIVE/SP where final + NRT for the recent ≤60-day edge, veg MODIS graceful-NaN.
+
+Validated the feeds (ingest-only, non-destructive): **20/20 weather+fire+veg** for 2026-06-01..06-20, MODIS data
+physically sane (NDVI [-0.2,0.99], LAI [0,7], FAPAR [0,1], LST 280–325 K). Then measured the silver rebuild on a
+51-day **temp-store** slice (real silver untouched): **0.54 s/day → full 5285-day rebuild ≈ 47 min.**
+
+Added a compact, verified **`## Module map (FGDC v2)`** to CLAUDE.md (real entry points for `src/data/ingest/` +
+`scripts/`) after repeatedly re-deriving interfaces; pointer saved as the `fgdc-module-map` memory.
+
+**Bugs found & fixed:**
+- **Silver rebuild was hard-blocked by the deleted v1 cube.** `build_silver._load_static` read `grid.V1_CUBE`
+  (deleted 2026-06-26) → any rebuild would crash on static-load. *Impact:* the monthly job could not rebuild silver
+  at all; worse, the 221 1 km static layers survived **only** inside the 150 GB silver, so a mid-rebuild failure
+  could have lost them. *Fix:* `build_silver.extract_static()` preserves them into `data/silver/FireGuard_static.zarr`
+  (44 MB, byte-identical to the refined-from-v1 static, incl. all masks); `_load_static` now reads that store
+  (V1_CUBE demoted to legacy fallback). Static-load runs *before* the rmtree, so the failure mode was at least
+  non-destructive.
+- **`build_silver` assumed a single native weather grid for all days.** It built ONE regridder from `dates[0]` and
+  applied it to every day → `IndexError` the moment a day's native grid differed. Surfaced because the new ingest's
+  bbox (`SPAIN_BBOX = -9.5,35.5,4.5,44.0`, 1995 pts) is **narrower than the historical backfill** (`-10,35.25,5,44.5`,
+  2318 pts). *Impact:* the full rebuild would have crashed in chunk 2 (caught on the temp slice, not live silver).
+  *Fix:* regridder cached **per native grid** (`_weather_regridder`, keyed by coord signature; only ~2 grids exist).
+  Verified seam-continuous across 05-31→06-01 (t2m 21.7→22.1, NDVI 0.563→0.563, no jump). *Secondary, flagged not
+  fixed:* the `SPAIN_BBOX` narrowing is a latent regression — harmless now that regridding is per-grid, but worth
+  realigning to the historical bbox so the backfill stops proliferating grids.
+- **Engineered stage ran the producer AFTER the consumer (ordering bug).** The clean from-scratch baseline
+  exposed it: `add_engineered_features`'s `spi_90d` reads `precip_sum_90d`, but `precip_sum_{7,30,90,180,365}d` is
+  *produced* by `add_fire_context` — and `batch_job`/`extend_cube` ran `add_engineered` FIRST → `KeyError:
+  'precip_sum_90d'` after ~80 min (silver+coarsen had already succeeded). *Impact:* the `coarsen --overwrite`
+  rebuilt gold before the failure, so gold was left **raw + 3 engineered (251/278 vars), serving features
+  incomplete** — recoverable (silver complete, bronze intact), needs a gold re-run. *Fix:* swapped the order to
+  **`add_fire_context` → `add_engineered_features`** in both `batch_job.py` and `extend_cube.py` (+ CLAUDE.md
+  pipeline order). `add_fire_context` depends only on raw vars, so the order is acyclic.
+- **Incremental gold edge was non-atomic (found in code review, fixed).** `update_edge.update_gold_edge` appended new
+  rows with NaN engineered, then computed + region-wrote engineered in a *separate* step — a crash between the two
+  (OOM/teardown/kill, all of which happened) would leave permanent NaN-engineered edge rows that the date-based
+  currency check (`new = silver days > gold_last`) mistakes for complete → serving reads NaN `dist_to_fire`, regime
+  classifier collapses. *Fix:* build a VIRTUAL extended cube (lazy zarr history + in-memory new raw + NaN
+  placeholders), compute engineered from it, then append COMPLETE rows in ONE write — a crash now leaves only
+  fewer-DAY rows the date check self-heals. Re-verified bit-identical (`--test`/`--e2e`). Also merged the two
+  near-duplicate `_causal_anomaly_edge*` fns into one (review #4).
+
+**Live-serving label semantics (settled this session).** The `is_fire[t]` label is the **whole-UTC-day union of
+VIIRS-SNPP detections** (conf ≥ nominal) with `acq_date == t` — i.e. BOTH SNPP passes that fall on UTC day `t`
+(~01:30 UTC night + ~13:30 UTC afternoon), not a single pass (`ingest_fire.py` filters `acq_date == wd`). "Day" =
+UTC calendar day. Consequence for serving: `is_fire[t]` (and `dist_to_fire[t]`, `time_since_last_fire[t]`) is
+**complete only after `t`'s ~13:30 UTC afternoon pass settles in FIRMS (~3 h → ~16:30 UTC)**. So scoring before
+that has only a *partial* `t` (night pass only) — a label-definition mismatch, not just staleness. Live rule:
+issue date `t` = latest UTC date whose afternoon SNPP pass has settled; predict `t+1`; before settle, latest
+complete `t` is yesterday (a same-day nowcast). A 5 am score predicts *today*; an evening score predicts
+*tomorrow* — the horizon is data-relative. **Baked a `latest_complete_fire_date()` gate into `daily_job`.**
+
+**Objectives logged (not yet built):**
+- **NOAA-20 VIIRS pooling — experiment.** `ingest_fire` is SNPP-only; pool NOAA-20 (VNP14IMG, 2018+) for ~2×
+  detection density / more passes. Test next-day AP lift + the train/serve-coverage seam (SNPP-only pre-2018).
+- **2/3-day union target — secondary objective.** Rolling-OR label P(fire within {2,3} d). Already **proven to
+  lift AP** (less sparse, higher-skill than the spiky t+1). New rationale from the label-settle analysis: a
+  multi-day union is **robust to the ≤1-day completeness lag** — predicting "fire within 2–3 d of `t`" still
+  covers today+tomorrow even when forced onto a 1-day-stale `t`, so it stays **true forecasting on a stale
+  label**. Dual win (skill + operational robustness); serve a risk curve alongside the t+1 head.
+
 ## 2026-06-26 — `fgdc-forecast-features`: forecast weather PROVEN (+CAPE), calendar DROPPED, baseline floors, v1 cubes deleted
 
 Branch goal: push *past* v1 by adding next-day signal. Net — **one lever proven (t+1 forecast weather), one

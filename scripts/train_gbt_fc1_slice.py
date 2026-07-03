@@ -22,7 +22,7 @@ import pandas as pd
 import xarray as xr
 from sklearn.ensemble import HistGradientBoostingClassifier
 
-import scripts.train as T
+from src.data import metrics as T          # torch-free regime_metrics + project_root
 import scripts.fetch_openmeteo as OM
 from src.data.features_fireguard import FGDC_FEATURE_VARS
 from src.data.ingest import grid, ingest_weather as IW

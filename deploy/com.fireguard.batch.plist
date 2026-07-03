@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  FGDC weekly batch LaunchAgent. Fires DAILY at 11:00 (and at load/login); the run_batch.sh wrapper no-ops
+  unless it's been >= 7 days since the last success (catch-up-if-overdue), so the effective cadence is WEEKLY
+  while staying robust to the laptop being asleep at any fixed time (launchd runs a missed StartCalendarInterval
+  on the next wake). User-session agent (silver is local; needs the user's repo/.venv/.env/network).
+
+  Install:   cp deploy/com.fireguard.batch.plist ~/Library/LaunchAgents/
+             launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.fireguard.batch.plist
+  Status:    launchctl print gui/$(id -u)/com.fireguard.batch
+  Run now:   launchctl kickstart -k gui/$(id -u)/com.fireguard.batch
+  Uninstall: launchctl bootout gui/$(id -u)/com.fireguard.batch && rm ~/Library/LaunchAgents/com.fireguard.batch.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.fireguard.batch</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/vladimir/ml-wildfire-prediction/scripts/run_batch.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/vladimir/ml-wildfire-prediction</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>11</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/vladimir/ml-wildfire-prediction/data/serving_store/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/vladimir/ml-wildfire-prediction/data/serving_store/launchd.err.log</string>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

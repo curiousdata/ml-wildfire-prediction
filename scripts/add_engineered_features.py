@@ -44,6 +44,7 @@ from src.data.feature_engineering import (
     day_of_year_sincos,
     day_of_week_sincos
 )
+from src.data.regions import CCAA_TO_SUBDIV        # shared region map (was duplicated here + update_edge)
 
 COMPRESSOR = Blosc(cname="zstd", clevel=3, shuffle=2)
 TP_TO_DAILY_MM = 2.9  # calibrated cumulative-mean -> daily-total factor (AEMET national ~640 mm/yr)
@@ -214,10 +215,8 @@ def main() -> None:
 
     # Holidays. national = Spain-wide (constant plane); regional = community-specific EXTRA days (subdiv
     # holidays MINUS the national set, so national/regional channels are non-redundant), painted onto cells
-    # by AutonomousCommunities code. Both for t and t+1. Codes per scripts/daily_job.py CCAA legend; code 5
-    # (Canarias) is off-grid, 0 = no region (sea/outside). Subdiv = ISO 3166-2:ES.
-    CCAA_TO_SUBDIV = {1: "AN", 2: "AR", 3: "AS", 4: "IB", 6: "CB", 7: "CL", 8: "CM", 9: "CT",
-                      10: "VC", 11: "EX", 12: "GA", 13: "MD", 14: "MC", 15: "NC", 16: "PV", 17: "RI"}
+    # by AutonomousCommunities code. Both for t and t+1. CCAA_TO_SUBDIV (code -> ISO 3166-2:ES) is imported
+    # from src.data.regions (shared with update_edge).
     years = range(int(pd_dates.year.min()), int(pd_dates_tp1.year.max()) + 1)
     nat_days = set(_hol.Spain(years=years).keys())
 

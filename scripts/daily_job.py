@@ -1,22 +1,25 @@
-"""Daily collect→infer→log job + store — the operational pipeline skeleton (IberFire-v2 + tracking).
+"""Daily collect→infer→log job — the FGDC v2 operational pipeline.
 
-Each run, for one "issue date" (t): build the feature slice, run the GBT, and append to a date-partitioned
-store:
+For one issue date t: build the RAW FGDC feature slice, run the production GBT (`gbt_fireguard`) + isotonic
+calibrator, classify regime (`dist_to_fire` ≤ 6 km → spread, else new-ignition), and append to a
+date-partitioned store:
   serving_store/inference/issue_date=YYYY-MM-DD.parquet  — per-region ignition/spread summary (alerts log)
-  serving_store/grids/YYYY-MM-DD.npz                      — full prob/regime/today-fire grids (for later
-                                                            per-cell eval vs what actually burned at t+1)
-  serving_store/feature_stats/date=YYYY-MM-DD.parquet     — per-feature land stats (DRIFT / pipeline-health)
+  serving_store/grids/YYYY-MM-DD.npz                      — full prob/regime/today-fire grids (per-cell eval)
+  serving_store/feature_stats/date=YYYY-MM-DD.parquet     — per-feature land stats (drift / pipeline health)
 
-Two modes:
-  --mode replay (default): pulls the day from the existing cube (seeds the store now; proves the plumbing).
-  --mode live: fetch AEMET+FIRMS+CLMS → assemble slice → same logging. Gated on API keys + slice assembly
-               (the next build) — currently raises with guidance.
+Modes:
+  --mode replay (default): pull the day from the existing gold cube — proves the v2 plumbing, seeds the store.
+  --mode live: the **no-cold-start append loop** (fetch feeds → append cube → recompute engineered features
+               over a trailing window → predict). Issue date is gated by `latest_complete_fire_date()` — `t` is
+               scoreable only after its afternoon SNPP pass settles. [phase B — not built yet; raises w/ guidance.]
 
-Idempotent (skips a date already logged unless --overwrite). Run daily via cron, or --backfill N to seed.
-Inspect with --show.
+v2 vs the legacy v1 job: `gbt_fireguard` + `FGDC_FEATURE_VARS`, **raw** features (no normalization — the GBT is
+trained raw), **torch-free** (`src.data.metrics`), reads `FireGuard_coarse4.zarr`, and **no warm-start**.
+Idempotent (skips a logged date unless --overwrite). Inspect with --show.
 """
 from __future__ import annotations
 import argparse
+import datetime as _dt
 import json
 import sys
 from datetime import datetime, timezone
@@ -31,64 +34,91 @@ import joblib
 import numpy as np
 import pandas as pd
 import xarray as xr
-import scripts.train as T
-from src.data.features import build_segmentation_features
 
-STORE = T.project_root / "data" / "serving_store"
-CCAA = {1: "Andalucía", 2: "Aragón", 3: "Asturias", 4: "Baleares", 6: "Cantabria",
-        7: "Castilla y León", 8: "Castilla-La Mancha", 9: "Cataluña", 10: "C. Valenciana",
-        11: "Extremadura", 12: "Galicia", 13: "Madrid", 14: "Murcia", 15: "Navarra",
-        16: "País Vasco", 17: "La Rioja"}
+from src.data import metrics as M                        # torch-free project_root
+
+CUBE = M.project_root / "data" / "gold" / "FireGuard_coarse4.zarr"
+STORE = M.project_root / "data" / "serving_store"
+MODEL = M.project_root / "models" / "gbt_fireguard.joblib"
+CALIBRATOR = M.project_root / "models" / "gbt_fireguard.calibrator.joblib"
+REGIME_KM = 6.0
+# Live completeness gate: is_fire[t] is the UTC-day UNION of both SNPP passes, so day t is COMPLETE as a feature
+# day only after its ~13:30 UTC afternoon pass settles in FIRMS (~3 h). Scoring t before that uses only the night
+# pass = a partial, off-distribution label (see the `fire-label-timing` memory).
+FIRMS_AFTERNOON_SETTLE_UTC = 17     # UTC hour after which day t's afternoon SNPP pass is reliably in FIRMS
+from src.data.regions import CCAA_NAMES as CCAA        # shared region map (code -> display name)
+
+
+def latest_complete_fire_date(now_utc=None):
+    """Latest UTC date usable as a COMPLETE feature day `t` (then predict t+1). is_fire[t] is the whole-UTC-day
+    union of both SNPP passes, so `t` isn't complete until its ~13:30 UTC afternoon pass settles in FIRMS
+    (~FIRMS_AFTERNOON_SETTLE_UTC UTC). Before that, today has only its night pass → latest complete is yesterday
+    (a same-day nowcast); after, it's today (a true next-day forecast). See the `fire-label-timing` memory."""
+    now = now_utc or datetime.now(timezone.utc)
+    today = now.date()
+    return today if now.hour >= FIRMS_AFTERNOON_SETTLE_UTC else today - _dt.timedelta(days=1)
 
 
 def _load():
-    feats = build_segmentation_features(xr.open_zarr(str(T.CUBE), consolidated=True).data_vars)
-    ds = T.make_dataset("2008-01-01", "2024-12-31", feats, use_stack=True)  # full range so any date is reachable
-    art = joblib.load(T.project_root / "models" / "gbt_coarse4.joblib")
-    calib_path = T.project_root / "models" / "gbt_coarse4.calibrator.joblib"
-    calib = joblib.load(calib_path) if calib_path.exists() else None
-    ccaa = np.rint(np.nan_to_num(xr.open_zarr(str(T.CUBE), consolidated=True)["AutonomousCommunities"].values)).astype(int)
-    return feats, ds, art["model"], calib, ccaa
+    """Open the gold cube + the production model/calibrator; precompute land mask, region codes, static cols."""
+    z = xr.open_zarr(str(CUBE), consolidated=True)
+    art = joblib.load(MODEL)
+    gbt, feats = art["model"], art["features"]            # the model's exact feature list + order
+    calib = joblib.load(CALIBRATOR) if CALIBRATOR.exists() else None
+    land = np.nan_to_num(z["is_spain"].values) > 0.5
+    ccaa = np.rint(np.nan_to_num(z["AutonomousCommunities"].values)).astype(int)
+    dyn_set = {f for f in feats if "time" in z[f].dims}
+    stat_vals = {f: z[f].values.astype(np.float32)[land] for f in feats if f not in dyn_set}
+    return z, gbt, feats, calib, land, ccaa, dyn_set, stat_vals
 
 
-def day_drivers(gbt, Xn, regg, prob, feats, topk_cells=200, topk=6):
-    """Per-DAY attribution: what pushed THIS prediction up. For the day's highest-risk cells (per regime),
-    zero each feature (= its training mean — features are normalized) and measure the mean predicted-risk
-    DROP. A large positive drop ⇒ that feature's actual value today is driving risk up. Dependency-free
-    (no SHAP); occlusion-to-baseline, so it's an approximation that ignores feature interactions."""
-    C = Xn.shape[0]
-    Xf = Xn.reshape(C, -1).T
-    flat_p = np.asarray(prob).ravel(); regf = np.asarray(regg).ravel()
+def build_feat(z, t_idx, feats, land, dyn_set, stat_vals):
+    """Raw FGDC features for day t over land → (n_land, n_feat) in the model's order (no normalization)."""
+    cols = [z[f].isel(time=t_idx).values.astype(np.float32)[land] if f in dyn_set else stat_vals[f]
+            for f in feats]
+    return np.stack(cols, -1)
+
+
+def day_drivers(gbt, X, reg_land, p, feats, topk_cells=200, topk=6):
+    """Per-day occlusion attribution: for the highest-risk cells per regime, set each feature to the day's
+    MEAN (raw — NOT 0; the v1 bug was zeroing normalized inputs) and measure the mean predicted-risk DROP.
+    A large positive drop ⇒ that feature's value today drives risk up. Occlusion-to-baseline (ignores
+    interactions); dependency-free (no SHAP)."""
+    fmean = X.mean(0)
     out = {}
     for name, code in (("ignition", 1), ("spread", 2)):
-        idx = np.where(regf == code)[0]
+        idx = np.where(reg_land == code)[0]
         if idx.size == 0:
             continue
         k = min(topk_cells, idx.size)
-        focus = idx[np.argsort(flat_p[idx])[::-1][:k]]   # the relatively-highest-risk cells of this regime
-        Xfoc = Xf[focus]
+        focus = idx[np.argsort(p[idx])[::-1][:k]]         # the relatively-highest-risk cells of this regime
+        Xfoc = X[focus]
         base = gbt.predict_proba(Xfoc)[:, 1].mean()
-        drops = np.empty(C)
-        for j in range(C):
-            Xo = Xfoc.copy(); Xo[:, j] = 0.0
+        drops = np.empty(len(feats))
+        for j in range(len(feats)):
+            Xo = Xfoc.copy(); Xo[:, j] = fmean[j]
             drops[j] = base - gbt.predict_proba(Xo)[:, 1].mean()
         order = np.argsort(drops)[::-1][:topk]
         out[name] = [{"feature": feats[j], "drop": float(drops[j])} for j in order if drops[j] > 1e-5]
     return out
 
 
-def _log(issue, target, prob, regg, today_fire, Xn, feats, ccaa, alert_thr, source_tag, refreshed=None, gbt=None):
+def _log(issue, target, p, reg_land, X, today_fire, feats, land, ccaa, gbt, alert_thr, source_tag, refreshed=None):
     """Write inference (region summary) + grid + feature-stats for one issued prediction."""
     import logging
     log = logging.getLogger("daily_job")
-    C = Xn.shape[0]
-    land2d = regg > 0
+    H, W = land.shape
+    flat = land.ravel()
+    prob_grid = np.zeros(H * W, np.float32); prob_grid[flat] = p
+    reg_grid = np.zeros(H * W, np.int8); reg_grid[flat] = reg_land
+    prob_grid, reg_grid = prob_grid.reshape(H, W), reg_grid.reshape(H, W)
     now = datetime.now(timezone.utc).isoformat()
+
     rows = []
     for code, name in CCAA.items():
         rm = ccaa == code
         for rl, rcode in (("ignition", 1), ("spread", 2)):
-            cells = prob[rm & (regg == rcode)]
+            cells = prob_grid[rm & (reg_grid == rcode)]
             if cells.size == 0:
                 continue
             rows.append(dict(issue_date=issue, target_date=target, region_code=code, region_name=name,
@@ -97,78 +127,77 @@ def _log(issue, target, prob, regg, today_fire, Xn, feats, ccaa, alert_thr, sour
                              n_alert=int((cells >= alert_thr).sum()), source=source_tag, logged_at=now))
     (STORE / "inference").mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_parquet(STORE / "inference" / f"issue_date={issue}.parquet", index=False)
+
+    drivers = day_drivers(gbt, X, reg_land, p, feats)
     (STORE / "grids").mkdir(parents=True, exist_ok=True)
-    drivers = day_drivers(gbt, Xn, regg, prob, feats) if gbt is not None else {}
-    np.savez_compressed(STORE / "grids" / f"{issue}.npz", prob=prob, regime=regg,
+    np.savez_compressed(STORE / "grids" / f"{issue}.npz", prob=prob_grid, regime=reg_grid,
                         today_fire=today_fire, issue_date=issue, target_date=target, source=source_tag,
                         fetched_at=now, refreshed=json.dumps(refreshed or []), drivers=json.dumps(drivers))
-    Xland = Xn.reshape(C, -1)[:, land2d.ravel()]
-    fs = [dict(date=issue, feature=feats[j], mean=float(np.nanmean(Xland[j])), std=float(np.nanstd(Xland[j])),
-               min=float(np.nanmin(Xland[j])), max=float(np.nanmax(Xland[j])),
-               nan_frac=float(np.isnan(Xland[j]).mean()), logged_at=now) for j in range(C)]
+    fs = [dict(date=issue, feature=feats[j], mean=float(np.nanmean(X[:, j])), std=float(np.nanstd(X[:, j])),
+               min=float(np.nanmin(X[:, j])), max=float(np.nanmax(X[:, j])),
+               nan_frac=float(np.isnan(X[:, j]).mean()), logged_at=now) for j in range(len(feats))]
     (STORE / "feature_stats").mkdir(parents=True, exist_ok=True)
     pd.DataFrame(fs).to_parquet(STORE / "feature_stats" / f"date={issue}.parquet", index=False)
-    log.info(f"{issue} [{source_tag}]: logged {len(rows)} region-rows, grid, {C} feature-stats (target {target})")
+    log.info(f"{issue} [{source_tag}]: logged {len(rows)} region-rows, grid, {len(feats)} feature-stats (target {target})")
 
 
-def run_day(idx, feats, ds, gbt, calib, ccaa, overwrite, alert_thr):
+def predict_day(z, t_idx, gbt, feats, calib, land, ccaa, dyn_set, stat_vals, alert_thr, overwrite, source_tag):
+    """Build raw features for day t_idx, predict + calibrate, classify regime, log to the store."""
     import logging
     log = logging.getLogger("daily_job")
-    issue = str(ds.get_time_value(idx))[:10]
-    target = str(ds.get_time_value(min(idx + 1, len(ds) - 1)))[:10]
+    times = pd.DatetimeIndex(z["time"].values)
+    issue = str(times[t_idx].date())
+    target = str((times[t_idx] + pd.Timedelta(days=1)).date())
     if (STORE / "inference" / f"issue_date={issue}.parquet").exists() and not overwrite:
         log.info(f"{issue}: already logged (skip)"); return
-    X, y, reg = ds[idx]
-    C, H, W = X.shape
-    Xn = X.numpy(); regf = reg[0].numpy().ravel(); land = regf > 0
-    p = gbt.predict_proba(Xn.reshape(C, -1).T[land])[:, 1]
-    p = calib.predict(p) if calib is not None else p
-    prob = np.zeros(H * W, np.float32); prob[land] = p
-    prob, regg = prob.reshape(H, W), reg[0].numpy()
-    today_fire = (ds.ds["is_fire"].sel(time=ds.get_time_value(idx)).values > 0.5).astype(np.float32)
-    _log(issue, target, prob, regg, today_fire, Xn, feats, ccaa, alert_thr, "replay", gbt=gbt)
-
-
-def run_live(date, feats, ds, gbt, calib, ccaa, overwrite, alert_thr):
-    """Real live prediction for `date`: warm-start from the latest cube slice, overwrite live features
-    (Open-Meteo temp + FIRMS fire), predict, log. target = date+1."""
-    import datetime as _dt
-    import logging
-    import scripts.live_slice as LS
-    log = logging.getLogger("daily_job")
-    if (STORE / "inference" / f"issue_date={date}.parquet").exists() and not overwrite:
-        log.info(f"{date}: already logged (skip)"); return
-    stats = __import__("json").loads(Path(T.STATS).read_text())
-    # warm-start from the cube slice with the nearest DAY-OF-YEAR (seasonal match for the features we don't
-    # yet refresh live — antecedent dryness, vegetation, etc.), latest year among ties. Avoids applying e.g.
-    # winter dryness to a summer prediction. (Full fix = live antecedents from a rolling history.)
-    tgt_doy = _dt.date.fromisoformat(date).timetuple().tm_yday
-    cdoy = np.array([pd.Timestamp(ds.get_time_value(i)).dayofyear for i in range(len(ds))])
-    circ = np.minimum(np.abs(cdoy - tgt_doy), 366 - np.abs(cdoy - tgt_doy))
-    base_idx = int(np.where(circ == circ.min())[0][-1])  # nearest day-of-year, latest year
-    log.info(f"{date}: warm-start from cube {str(ds.get_time_value(base_idx))[:10]} (Δdoy={int(circ.min())})")
-    src = "archive" if date < "2025-01-01" else "forecast"
-    Xn, regg, today_fire, refreshed = LS.build_live_slice(date, feats, ds, stats, base_idx,
-                                                          source=src, use_firms=True)
-    log.info(f"{date} live: refreshed {refreshed}")
-    prob = LS.predict(gbt, calib, Xn, regg)
-    target = (_dt.date.fromisoformat(date) + _dt.timedelta(days=1)).isoformat()
-    _log(date, target, prob, regg, today_fire, Xn, feats, ccaa, alert_thr, f"live:{src}+firms",
-         refreshed=refreshed, gbt=gbt)
+    X = build_feat(z, t_idx, feats, land, dyn_set, stat_vals)
+    p = gbt.predict_proba(X)[:, 1]
+    p = calib.predict(p) if calib is not None else p      # true-prevalence calibrated risk
+    d2f = z["dist_to_fire"].isel(time=t_idx).values[land]
+    reg_land = np.where(d2f <= REGIME_KM, 2, 1).astype(np.int8)
+    today_fire = (z["is_fire"].isel(time=t_idx).values > 0.5).astype(np.float32)
+    _log(issue, target, p, reg_land, X, today_fire, feats, land, ccaa, gbt, alert_thr, source_tag)
 
 
 def show():
     inf = sorted((STORE / "inference").glob("*.parquet"))
     print(f"store: {STORE}")
-    print(f"  inference days: {len(inf)}  | grids: {len(list((STORE/'grids').glob('*.npz')))} | "
+    print(f"  inference days: {len(inf)} | grids: {len(list((STORE/'grids').glob('*.npz')))} | "
           f"feature_stats days: {len(list((STORE/'feature_stats').glob('*.parquet')))}")
     if inf:
         df = pd.concat([pd.read_parquet(f) for f in inf[-3:]], ignore_index=True)
-        top = df.sort_values("max_prob", ascending=False).head(8)
-        print("  recent top region-risk rows:")
-        for _, r in top.iterrows():
+        for _, r in df.sort_values("max_prob", ascending=False).head(8).iterrows():
             print(f"    {r.issue_date}->{r.target_date} {r.regime:<9} {r.region_name:<18} "
                   f"max={r.max_prob:.3f} exp_cells={r.expected_count:.1f} alerts={r.n_alert}")
+
+
+def serve_live(date_arg, alert_thr):
+    """Progressive-refinement live serve: predict t+1 from TODAY's forecast+NRT edge via the ephemeral serve
+    engine (extend_cube.serve_edge — fetch forecast/NRT, seed from the cube tail, compute engineered, NO cube
+    write). Stamped PRELIMINARY until today's afternoon SNPP pass settles (~17 UTC); re-running later refines
+    (overwrites the logged prediction). See the `fire-label-timing` memory."""
+    import logging
+    import scripts.extend_cube as EC
+    log = logging.getLogger("daily_job")
+    now = datetime.now(timezone.utc)
+    t = date_arg or now.date().isoformat()                          # predict from TODAY's edge (partial fire ok)
+    issue, fields = EC.serve_edge(CUBE, t)
+    z, gbt, feats, calib, land, ccaa, dyn_set, stat_vals = _load()
+    if fields is None:                                              # t already settled in the cube → replay it
+        i = int(np.where(pd.DatetimeIndex(z["time"].values).date == _dt.date.fromisoformat(issue))[0][0])
+        predict_day(z, i, gbt, feats, calib, land, ccaa, dyn_set, stat_vals, alert_thr, True, "live-settled")
+        return
+    X = np.stack([fields[f][land] if f in dyn_set else stat_vals[f] for f in feats], -1)
+    p = gbt.predict_proba(X)[:, 1]
+    p = calib.predict(p) if calib is not None else p
+    reg_land = np.where(fields["dist_to_fire"][land] <= REGIME_KM, 2, 1).astype(np.int8)
+    today_fire = (fields["is_fire"] > 0.5).astype(np.float32)
+    target = str((pd.Timestamp(issue) + pd.Timedelta(days=1)).date())
+    prelim = (issue == now.date().isoformat()) and (now.hour < FIRMS_AFTERNOON_SETTLE_UTC)
+    tag = "live-prelim" if prelim else "live"
+    _log(issue, target, p, reg_land, X, today_fire, feats, land, ccaa, gbt, alert_thr, tag)
+    log.info(f"LIVE [{tag}]: issue {issue} → predict {target} "
+             f"({'PRELIMINARY (today afternoon pass not settled)' if prelim else 'fire complete'})")
 
 
 def main():
@@ -184,22 +213,19 @@ def main():
     args = ap.parse_args()
     if args.show:
         show(); return
-    feats, ds, gbt, calib, ccaa = _load()
     if args.mode == "live":
-        if not args.date:
-            import datetime as _dt
-            args.date = (_dt.date.today() - _dt.timedelta(days=1)).isoformat()  # yesterday (feeds settled)
-        run_live(args.date, feats, ds, gbt, calib, ccaa, args.overwrite, args.alert_thr)
-        show(); return
-    dates = [str(ds.get_time_value(i))[:10] for i in range(len(ds))]
+        serve_live(args.date, args.alert_thr); show(); return
+
+    z, gbt, feats, calib, land, ccaa, dyn_set, stat_vals = _load()
+    times = pd.DatetimeIndex(z["time"].values)
     if args.backfill > 0:
-        idxs = list(range(len(ds) - args.backfill, len(ds)))
+        idxs = list(range(len(times) - args.backfill, len(times)))
     elif args.date:
-        idxs = [dates.index(args.date)]
+        idxs = [int(np.where(times.date == _dt.date.fromisoformat(args.date))[0][0])]
     else:
-        idxs = [len(ds) - 1]
+        idxs = [len(times) - 1]
     for i in idxs:
-        run_day(i, feats, ds, gbt, calib, ccaa, args.overwrite, args.alert_thr)
+        predict_day(z, i, gbt, feats, calib, land, ccaa, dyn_set, stat_vals, args.alert_thr, args.overwrite, "replay")
     show()
 
 

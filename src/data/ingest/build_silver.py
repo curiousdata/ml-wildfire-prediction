@@ -34,6 +34,27 @@ from src.data.ingest import ingest_static as IS
 import scripts.fetch_openmeteo as OM
 
 SILVER = grid.ROOT / "data" / "silver" / "FireGuard.zarr"
+STATIC_STORE = grid.ROOT / "data" / "silver" / "FireGuard_static.zarr"   # preserved 1 km static (see _load_static)
+
+
+def extract_static(src=SILVER, out=STATIC_STORE, overwrite=False):
+    """Preserve the time-invariant (static) layers into a standalone 1 km store so silver can be rebuilt
+    WITHOUT the (deleted 2026-06-26) v1 cube. The current silver's static IS the refined-from-v1 static, so
+    this is byte-identical to what the old `_load_static(V1_CUBE)` produced — and it's the ONLY surviving copy
+    (extract it before any rebuild can put it at risk). Idempotent unless --overwrite."""
+    import shutil
+    from numcodecs import Blosc
+    out = Path(out)
+    if out.exists():
+        if not overwrite:
+            return out
+        shutil.rmtree(out)
+    z = xr.open_zarr(str(src), consolidated=False)
+    stat = z[[v for v in z.data_vars if "time" not in z[v].dims]]
+    comp = Blosc(cname="zstd", clevel=3, shuffle=Blosc.BITSHUFFLE)
+    stat.to_zarr(str(out), mode="w", zarr_format=2, consolidated=True,
+                 encoding={v: {"compressor": comp} for v in stat.data_vars})
+    return out
 
 
 def _dates_present():
@@ -44,10 +65,16 @@ def _dates_present():
 
 
 def _load_static(refine=True):
-    """v1 static vars (dims y,x) refined ×4 onto the 1 km grid → {name: array[NY,NX]}. EXCLUDES v1's
-    popdens_* (WorldPop, stops 2020) — the FGDC sources population from GHS-POP instead (added per-day,
-    temporally interpolated, in build())."""
-    z = xr.open_zarr(str(grid.V1_CUBE), consolidated=True)
+    """Static (time-invariant) layers on the 1 km grid → {name: array[NY,NX]}.
+
+    Primary source = the standalone STATIC_STORE (preserved by extract_static(): the refined-from-v1 static,
+    already 1 km, popdens already excluded). Falls back to the legacy v1 cube (refine ×4, drop popdens) only if
+    the store is absent — but V1_CUBE was deleted 2026-06-26, so on this machine the store is required (run
+    `extract_static()` once before rebuilding silver)."""
+    if STATIC_STORE.exists():
+        z = xr.open_zarr(str(STATIC_STORE), consolidated=True)
+        return {v: np.asarray(z[v].values, np.float32) for v in z.data_vars}
+    z = xr.open_zarr(str(grid.V1_CUBE), consolidated=True)        # legacy fallback (deleted on this machine)
     out = {}
     for v in z.data_vars:
         if "time" not in z[v].dims and not v.startswith("popdens"):
@@ -59,15 +86,31 @@ def _is_continuous(var):
     """ Find continuous variables that carry a noisy enough signal to apply compression with BitRound. """
     return not (var in ['is_fire'] or var.startswith('is_') or var.startswith('CLC_'))
  
-def _dyn_chunk(cdates, wkeys, vkeys, ghs, wregrid=None):
-    """Build the dynamic [time,y,x] arrays for a small set of dates (bounded memory). Weather bronze is
-    stored at native ~0.25°; `wregrid` (OM.make_regridder) upsamples each native vector to the 1 km grid
-    on read. (Legacy 1 km bronze, where each value is already a grid, passes through when wregrid is None.)"""
+def _weather_regridder(w, gx, gy, cache):
+    """Native→1 km regridder for THIS day's weather grid, cached by coordinate signature. The native grid is
+    NOT constant across the backfill (Open-Meteo's bbox/grid has drifted: e.g. 2318-pt vs 1995-pt days), so a
+    single regridder-from-day0 is wrong — we build one per distinct grid (only a handful exist → ~free).
+    Returns None for legacy 1 km bronze (values already gridded; no coord arrays)."""
+    if IW.WLON not in w.files:
+        return None
+    lon, lat = w[IW.WLON], w[IW.WLAT]
+    sig = (lon.size, lat.size, float(lon[0]), float(lon[-1]), float(lat[0]), float(lat[-1]))
+    rg = cache.get(sig)
+    if rg is None:
+        rg = cache[sig] = OM.make_regridder(lon, lat, gx, gy)
+    return rg
+
+
+def _dyn_chunk(cdates, wkeys, vkeys, ghs, gx, gy, rg_cache):
+    """Build the dynamic [time,y,x] arrays for a small set of dates (bounded memory). Weather bronze is stored
+    at native ~0.25°; a per-grid regridder (see _weather_regridder) upsamples each native vector to the 1 km
+    grid on read. (Legacy 1 km bronze, where each value is already a grid, passes through.)"""
     dyn = {k: np.empty((len(cdates), grid.NY, grid.NX), np.float32) for k in wkeys + ["is_fire"] + vkeys}
     for i, d in enumerate(cdates):
         w = np.load(IW.BRONZE / f"{d}.npz")
+        rg = _weather_regridder(w, gx, gy, rg_cache)
         for k in wkeys:
-            dyn[k][i] = wregrid(w[k]) if wregrid is not None else w[k]
+            dyn[k][i] = rg(w[k]) if rg is not None else w[k]
         dyn["is_fire"][i] = np.load(IF.BRONZE / f"{d}.npz")["is_fire"]
         if vkeys:
             vp = IV.BRONZE / f"{d}.npz"
@@ -97,13 +140,14 @@ def build(start, end, out=SILVER, with_static=True, chunk_days=20):
     gx, gy = grid.x_coords(), grid.y_coords()
     w0 = np.load(IW.BRONZE / f"{dates[0]}.npz")
     wkeys = [k for k in w0.files if k not in (IW.WLON, IW.WLAT)]      # feature keys only (drop coord arrays)
-    wregrid = OM.make_regridder(w0[IW.WLON], w0[IW.WLAT], gx, gy) if IW.WLON in w0.files else None  # native→1km
+    native = IW.WLON in w0.files                                      # native points → regrid per-grid on read
+    rg_cache: dict = {}
     vkeys = list(np.load(IV.BRONZE / f"{dates[0]}.npz").files) if (IV.BRONZE / f"{dates[0]}.npz").exists() else []
     ghs = {p: e for p, e in ((p, IS.load_cached_epochs(p)) for p in ("popdens", "built_s")) if e}
     static = _load_static() if with_static else {}
     n_dyn = len(wkeys) + 1 + len(vkeys) + len(ghs)
     log.info(f"assembling {len(dates)} days [{dates[0]}..{dates[-1]}] | {n_dyn} dynamic "
-             f"(weather {len(wkeys)}{' native→1km' if wregrid is not None else ''} + fire + veg {len(vkeys)} "
+             f"(weather {len(wkeys)}{' native→1km' if native else ''} + fire + veg {len(vkeys)} "
              f"+ GHS {list(ghs)}) + {len(static)} static; chunked {chunk_days}d")
     comp = Blosc(cname="zstd", clevel=3, shuffle=Blosc.BITSHUFFLE)
     out = Path(out)
@@ -111,7 +155,7 @@ def build(start, end, out=SILVER, with_static=True, chunk_days=20):
         shutil.rmtree(out)
     for ci, c0 in enumerate(range(0, len(dates), chunk_days)):
         cdates = dates[c0:c0 + chunk_days]
-        dyn = _dyn_chunk(cdates, wkeys, vkeys, ghs, wregrid)
+        dyn = _dyn_chunk(cdates, wkeys, vkeys, ghs, gx, gy, rg_cache)
         ds = xr.Dataset({k: (("time", "y", "x"), v) for k, v in dyn.items()},
                         coords={"time": pd.to_datetime(cdates), "y": gy, "x": gx})
         if ci == 0:                                       # first write: + static + encoding + attrs
@@ -133,8 +177,43 @@ def build(start, end, out=SILVER, with_static=True, chunk_days=20):
     return out
 
 
+def append_new(end, src=SILVER, chunk_days=20):
+    """Incrementally append SETTLED days after the existing silver's last day, up to `end` — regrid + write ONLY
+    the new days (no full re-regrid of 14 yr of history; the WEEKLY-cadence path). Static is time-invariant and
+    already present, so only the dynamic [time,y,x] vars are appended; the dynamic var set/order must match the
+    store (it does — `_dyn_chunk` emits exactly the dynamic family `build` wrote). Returns the appended dates."""
+    import logging, zarr
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    log = logging.getLogger("build_silver")
+    z = xr.open_zarr(str(src), consolidated=True)
+    last = str(pd.Timestamp(z["time"].values[-1]).date())
+    start = (pd.Timestamp(last) + pd.Timedelta(days=1)).date().isoformat()
+    dates = [d for d in _dates_present() if start <= d <= end]
+    if not dates:
+        log.info(f"silver already current to {last} — nothing to append"); return []
+    gx, gy = grid.x_coords(), grid.y_coords()
+    w0 = np.load(IW.BRONZE / f"{dates[0]}.npz")
+    wkeys = [k for k in w0.files if k not in (IW.WLON, IW.WLAT)]
+    vkeys = list(np.load(IV.BRONZE / f"{dates[0]}.npz").files) if (IV.BRONZE / f"{dates[0]}.npz").exists() else []
+    ghs = {p: e for p, e in ((p, IS.load_cached_epochs(p)) for p in ("popdens", "built_s")) if e}
+    rg_cache: dict = {}
+    log.info(f"appending {len(dates)} new day(s) [{dates[0]}..{dates[-1]}] after {last} (incremental)")
+    for c0 in range(0, len(dates), chunk_days):
+        cdates = dates[c0:c0 + chunk_days]
+        dyn = _dyn_chunk(cdates, wkeys, vkeys, ghs, gx, gy, rg_cache)
+        ds = xr.Dataset({k: (("time", "y", "x"), v) for k, v in dyn.items()},   # dynamic only — static untouched
+                        coords={"time": pd.to_datetime(cdates), "y": gy, "x": gx})
+        ds.to_zarr(str(src), append_dim="time", consolidated=False)
+        log.info(f"  appended {cdates[0]}..{cdates[-1]} ({len(cdates)}d)")
+    zarr.consolidate_metadata(str(src))
+    log.info(f"silver appended to {dates[-1]} (+{len(dates)}d, history untouched)")
+    return dates
+
+
 def main():
     a = sys.argv
+    if "--append" in a:                                   # incremental: append new settled days up to END
+        append_new(a[a.index("--append") + 1]); return
     start = a[a.index("--start") + 1] if "--start" in a else "2016-08-01"
     end = a[a.index("--end") + 1] if "--end" in a else "2016-08-31"
     build(start, end, with_static="--no-static" not in a)
