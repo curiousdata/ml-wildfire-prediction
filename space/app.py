@@ -157,20 +157,26 @@ def reproj_index():
     x = a["x"].astype(float); y = a["y"].astype(float)
     H, W = len(y), len(x); dx = (x[-1] - x[0]) / (W - 1); dy = (y[-1] - y[0]) / (H - 1)
     fwd = Transformer.from_crs("EPSG:3035", "EPSG:4326", always_xy=True)
-    clon, clat = fwd.transform([x[0], x[0], x[-1], x[-1]], [y[0], y[-1], y[0], y[-1]])
-    lo0, lo1, la0, la1 = min(clon), max(clon), min(clat), max(clat)   # cell-CENTRE extremes → resample pixel centres
-    LON, LAT = np.meshgrid(np.linspace(lo0, lo1, W), np.linspace(la1, la0, H))
+    # ImageOverlay bounds at cell EDGES (centre ± half-cell).
+    elon, elat = fwd.transform([x[0] - dx / 2, x[0] - dx / 2, x[-1] + dx / 2, x[-1] + dx / 2],
+                               [y[0] - dy / 2, y[-1] + dy / 2, y[0] - dy / 2, y[-1] + dy / 2])
+    bla0, bla1 = float(min(elat)), float(max(elat))   # south, north edges
+    blo0, blo1 = float(min(elon)), float(max(elon))   # west, east edges
+    # Display pixel CENTRES. Web-Mercator x is linear in lon, but y is NOT linear in lat — Leaflet stretches the
+    # ImageOverlay linearly in Mercator screen-space, so a lat-even image is pushed NORTH (Mercator convex). Sample
+    # each row at the latitude whose Mercator-y matches its screen position → the overlay seats exactly on the base.
+    def my(d): return np.log(np.tan(np.pi / 4 + np.radians(d) / 2))
+    def imy(v): return np.degrees(2 * np.arctan(np.exp(v)) - np.pi / 2)
+    lon_c = blo0 + ((np.arange(W) + 0.5) / W) * (blo1 - blo0)
+    lat_c = imy(my(bla1) + ((np.arange(H) + 0.5) / H) * (my(bla0) - my(bla1)))   # Mercator-even latitudes
+    LON, LAT = np.meshgrid(lon_c, lat_c)
     inv = Transformer.from_crs("EPSG:4326", "EPSG:3035", always_xy=True)
     SX, SY = inv.transform(LON.ravel(), LAT.ravel())
     col = np.rint((np.asarray(SX) - x[0]) / dx).astype(np.int64)
     row = np.rint((np.asarray(SY) - y[0]) / dy).astype(np.int64)
     ok = (col >= 0) & (col < W) & (row >= 0) & (row < H)
     idxmap = np.where(ok, row * W + col, -1).reshape(H, W)
-    # ImageOverlay bounds at cell EDGES (centre ± half-cell) so the overlay's pixel-centres seat on the grid. The
-    # centre-based box squished the overlay inward by a half-cell (~2.4 km) → content rendered a touch too far N.
-    elon, elat = fwd.transform([x[0] - dx / 2, x[0] - dx / 2, x[-1] + dx / 2, x[-1] + dx / 2],
-                               [y[0] - dy / 2, y[-1] + dy / 2, y[0] - dy / 2, y[-1] + dy / 2])
-    return idxmap, [[float(min(elat)), float(min(elon))], [float(max(elat)), float(max(elon))]]
+    return idxmap, [[bla0, blo0], [bla1, blo1]]
 
 
 def gather(a, idx):
