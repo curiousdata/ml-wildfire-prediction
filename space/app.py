@@ -321,6 +321,8 @@ st.session_state["seen_version"] = latest_version()
 
 prob, regime, fire = S["prob"], S["regime"], S["today_fire"]
 land = regime > 0
+fire = np.where(land, fire, 0.0)   # FIRMS covers the whole Iberian bbox; only show fire within our (Spain-only)
+                                   # prediction coverage — Portugal has fire but no forecast (adding it = backlog)
 prelim = S.get("prelim")
 n_fire = int((fire > 0.5).sum())
 
