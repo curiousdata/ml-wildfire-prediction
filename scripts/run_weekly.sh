@@ -5,16 +5,16 @@
 # then runs on the next wake. Success is recorded by a heartbeat file (exit-code based) — the source of truth for
 # "did the weekly refresh happen", independent of any log noise (e.g. MODIS/dask shutdown chatter).
 #
-# Idempotent + re-entrant: batch_job processes ALL new settled days since gold_last (so a missed week catches up
+# Idempotent + re-entrant: weekly_update processes ALL new settled days since gold_last (so a missed week catches up
 # in one run), exits "nothing to do" if already current, and the gold edge write is atomic (a crash leaves only
 # fewer-day rows the date check self-heals). A lock prevents an overlapping run.
 set -uo pipefail
 REPO="/Users/vladimir/ml-wildfire-prediction"
 PY="$REPO/.venv/bin/python"
 STORE="$REPO/data/serving_store"
-HEARTBEAT="$STORE/.batch_last_success"      # epoch seconds of the last successful run
-LOG="$STORE/batch_cron.log"
-LOCK="$STORE/.batch_lock"
+HEARTBEAT="$STORE/.weekly_last_success"      # epoch seconds of the last successful run
+LOG="$STORE/weekly_cron.log"
+LOCK="$STORE/.weekly_lock"
 DUE_DAYS=7
 mkdir -p "$STORE"
 cd "$REPO" || { echo "$(date -u +%FT%TZ) cannot cd $REPO" >>"$LOG"; exit 1; }
@@ -38,12 +38,12 @@ if [[ -f "$HEARTBEAT" ]]; then
   fi
 fi
 
-echo "$(ts) === batch run starting ===" >>"$LOG"
-if "$PY" scripts/batch_job.py >>"$LOG" 2>&1; then
+echo "$(ts) === weekly run starting ===" >>"$LOG"
+if "$PY" scripts/weekly_update.py >>"$LOG" 2>&1; then
   echo "$now" >"$HEARTBEAT"
-  echo "$(ts) === batch run OK (heartbeat updated) ===" >>"$LOG"
+  echo "$(ts) === weekly run OK (heartbeat updated) ===" >>"$LOG"
 else
   rc=$?
-  echo "$(ts) === batch run FAILED (exit $rc) — heartbeat NOT updated ===" >>"$LOG"
+  echo "$(ts) === weekly run FAILED (exit $rc) — heartbeat NOT updated ===" >>"$LOG"
   exit "$rc"
 fi

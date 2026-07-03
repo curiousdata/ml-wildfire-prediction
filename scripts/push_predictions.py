@@ -1,6 +1,6 @@
 """Push the latest serving prediction to the HF Dataset — Ship A (see the `hf-deploy-plan` memory).
 
-The engine (`daily_job.py --mode {live,replay}`) writes date-partitioned files under `data/serving_store/`.
+The engine (`serve.py --mode {live,replay}`) writes date-partitioned files under `data/serving_store/`.
 This step uploads only the SMALL, latest artifacts to the HF Dataset `curiousdata/fireguard-serving`:
 
   grids/<issue>.npz                       — the prob/regime/today_fire grid the Space renders (~30 KB)
@@ -16,8 +16,8 @@ not-yet-uploaded grid. Idempotent: re-pushing the same date overwrites in place.
 Auth: needs only HF write access — `HF_TOKEN` in `.env` (or `hf auth login`). No FIRMS/Open-Meteo key here.
 
 CLI:
-  python scripts/push_serving.py [--date YYYY-MM-DD] [--repo curiousdata/fireguard-serving] [--dry-run]
-Run it right after `daily_job` in the scheduled job so each new prediction lands on the Space.
+  python scripts/push_predictions.py [--date YYYY-MM-DD] [--repo curiousdata/fireguard-serving] [--dry-run]
+Run it right after `serve` in the scheduled job so each new prediction lands on the Space.
 """
 from __future__ import annotations
 import argparse
@@ -39,7 +39,7 @@ from src.data import metrics as M
 
 STORE = M.project_root / "data" / "serving_store"
 DEFAULT_REPO = "curiousdata/fireguard-serving"
-log = logging.getLogger("push_serving")
+log = logging.getLogger("push_predictions")
 
 
 def _pick_grid(date_arg: str | None) -> Path:
@@ -51,7 +51,7 @@ def _pick_grid(date_arg: str | None) -> Path:
         return p
     grids = sorted((STORE / "grids").glob("*.npz"))
     if not grids:
-        raise SystemExit(f"no grids under {STORE/'grids'} — run daily_job first")
+        raise SystemExit(f"no grids under {STORE/'grids'} — run serve first")
     return grids[-1]
 
 

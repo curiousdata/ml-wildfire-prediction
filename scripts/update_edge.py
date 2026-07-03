@@ -177,10 +177,10 @@ def compute_edge_engineered(z, i0, n_new):
 def update_gold_edge(gold=GOLD, silver=SILVER, to=None, dry_run=False):
     """Incrementally extend gold with new SETTLED silver days: coarsen them to 4 km, append COMPLETE rows
     (raw + NaN-placeholder engineered) so the time axis isn't ragged, compute the new days' engineered features
-    via the edge engine, and region-write them. Replaces whole-cube coarsen_fgdc + add_fire_context +
+    via the edge engine, and region-write them. Replaces whole-cube coarsen + add_fire_context +
     add_engineered for the weekly path — MBs/seconds, no swap. Returns the appended dates."""
     import logging
-    from src.data.ingest.coarsen_fgdc import _pool_rule
+    from src.data.ingest.coarsen import _pool_rule
     log = logging.getLogger("update_edge")
     zg = xr.open_zarr(str(gold), consolidated=True)
     zs = xr.open_zarr(str(silver), consolidated=True)

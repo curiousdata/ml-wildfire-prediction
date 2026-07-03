@@ -106,7 +106,7 @@ def day_drivers(gbt, X, reg_land, p, feats, topk_cells=200, topk=6):
 def _log(issue, target, p, reg_land, X, today_fire, feats, land, ccaa, gbt, alert_thr, source_tag, refreshed=None):
     """Write inference (region summary) + grid + feature-stats for one issued prediction."""
     import logging
-    log = logging.getLogger("daily_job")
+    log = logging.getLogger("serve")
     H, W = land.shape
     flat = land.ravel()
     prob_grid = np.zeros(H * W, np.float32); prob_grid[flat] = p
@@ -144,7 +144,7 @@ def _log(issue, target, p, reg_land, X, today_fire, feats, land, ccaa, gbt, aler
 def predict_day(z, t_idx, gbt, feats, calib, land, ccaa, dyn_set, stat_vals, alert_thr, overwrite, source_tag):
     """Build raw features for day t_idx, predict + calibrate, classify regime, log to the store."""
     import logging
-    log = logging.getLogger("daily_job")
+    log = logging.getLogger("serve")
     times = pd.DatetimeIndex(z["time"].values)
     issue = str(times[t_idx].date())
     target = str((times[t_idx] + pd.Timedelta(days=1)).date())
@@ -173,12 +173,12 @@ def show():
 
 def serve_live(date_arg, alert_thr):
     """Progressive-refinement live serve: predict t+1 from TODAY's forecast+NRT edge via the ephemeral serve
-    engine (extend_cube.serve_edge — fetch forecast/NRT, seed from the cube tail, compute engineered, NO cube
+    engine (serve_engine.serve_edge — fetch forecast/NRT, seed from the cube tail, compute engineered, NO cube
     write). Stamped PRELIMINARY until today's afternoon SNPP pass settles (~17 UTC); re-running later refines
     (overwrites the logged prediction). See the `fire-label-timing` memory."""
     import logging
-    import scripts.extend_cube as EC
-    log = logging.getLogger("daily_job")
+    import scripts.serve_engine as EC
+    log = logging.getLogger("serve")
     now = datetime.now(timezone.utc)
     t = date_arg or now.date().isoformat()                          # predict from TODAY's edge (partial fire ok)
     issue, fields = EC.serve_edge(CUBE, t)

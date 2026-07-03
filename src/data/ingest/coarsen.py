@@ -37,7 +37,7 @@ def _pool_rule(name: str) -> str:
 def coarsen(infile=SILVER, factor=4, out=None, overwrite=False):
     import logging
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-    log = logging.getLogger("coarsen_fgdc")
+    log = logging.getLogger("coarsen")
     from numcodecs import Blosc
 
     out = Path(out) if out else GOLD_DIR / f"FireGuard_coarse{factor}.zarr"

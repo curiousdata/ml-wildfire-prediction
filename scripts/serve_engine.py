@@ -8,7 +8,7 @@ memory): forecast + cube-tail seed → t+1, ephemeral. It **retires the old Opti
 rows to gold) — no provisional cube state to reconcile.
 
 `serve_edge(cube, t)` → `(issue_date, {var: grid[NY,NX]})` of day t's raw+engineered fields (None if t is already
-in the settled cube → caller predicts from the cube row). `daily_job --mode live` calls it, predicts, logs.
+in the settled cube → caller predicts from the cube row). `serve --mode live` calls it, predicts, logs.
 
 Reuse: `src.data.fetch` (Open-Meteo + FIRMS) + `ingest_weather.daily_point_features` (forecast weather → 4 km),
 `ingest_fire` (NRT fire → 4 km), `update_edge.compute_edge_engineered` (the one engine).
@@ -115,7 +115,7 @@ def main():
     ap = argparse.ArgumentParser(description="Ephemeral serve: build day-t edge fields (predict t+1). No cube write.")
     ap.add_argument("--to", help="issue date t YYYY-MM-DD (default: latest_complete_fire_date)")
     args = ap.parse_args()
-    from scripts.daily_job import latest_complete_fire_date
+    from scripts.serve import latest_complete_fire_date
     t = args.to or str(latest_complete_fire_date())
     issue, fields = serve_edge(CUBE, t)
     if fields is None:

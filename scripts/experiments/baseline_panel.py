@@ -4,7 +4,7 @@ Answers the credibility question the v1/v2 A/B never did: does the ML model beat
 STATUS QUO (a fire-weather index ranker) and the trivial PERSISTENCE / CLIMATOLOGY floors? Every
 score is ranked through ``scripts.train.regime_metrics`` (rank-based: full-prevalence ROC, matched-
 prevalence regime AP, R-precision @K) on the identical val split + regime decomposition as
-``train_gbt_fgdc.py`` — so the rows are directly comparable to the GBT's reported numbers.
+``train_gbt.py`` — so the rows are directly comparable to the GBT's reported numbers.
 
 Floors (no training):
   * climatology  : causal per-(cell, day-of-year) fire-rate learned from TRAIN days only, scored at
@@ -32,7 +32,7 @@ import pandas as pd
 import xarray as xr
 
 from src.data import metrics as T          # torch-free regime_metrics + project_root
-from scripts.train_gbt_fgdc import CUBE, REGIME_KM, NEG_RATIO
+from scripts.train_gbt import CUBE, REGIME_KM, NEG_RATIO
 
 MODEL = T.project_root / "models" / "gbt_fireguard.joblib"
 REPORTS = T.project_root / "reports"
@@ -56,7 +56,7 @@ def main():
     land = np.nan_to_num(datacube["is_spain"].values) > 0.5
     nland = int(land.sum())
     tmax = Tn - 1 - horizon
-    cut = int((tmax + 1) * 0.8)                           # identical split to train_gbt_fgdc
+    cut = int((tmax + 1) * 0.8)                           # identical split to train_gbt
     log.info(f"{Tn} days, {nland} land cells; train ≤ {cut}, val > {cut}")
 
     dynamic = [f for f in feats if "time" in datacube[f].dims]

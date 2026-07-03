@@ -56,7 +56,7 @@ from src.data.ingest import ingest_weather as IW
 from src.data import fetch as OM
 import src.data.feature_engineering as FE
 
-log = logging.getLogger("ingest_weather_cds")
+log = logging.getLogger("ingest_weather_master")
 
 DATASET = "reanalysis-era5-single-levels"
 # ERA5 CDS variable names → the NetCDF short names they arrive as.

@@ -7,7 +7,7 @@ absent — it falls outside the peninsular+Balearic grid; 0 = no region (sea/out
   - ``CCAA_NAMES``     : cube code -> display name.
 
 Extracted 2026-07-03 to de-duplicate copies that had drifted across the pipeline (update_edge,
-add_engineered_features, daily_job). **NB:** the deployable apps (``space/app.py``,
+add_engineered_features, serve). **NB:** the deployable apps (``space/app.py``,
 ``docker/monolith/app_live.py``) keep their OWN inline copies on purpose — they ship without ``src/`` on the
 path — so import this only from ``src/``-rooted scripts.
 """
