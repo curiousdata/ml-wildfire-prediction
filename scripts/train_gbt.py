@@ -22,7 +22,7 @@ import xarray as xr
 from sklearn.ensemble import HistGradientBoostingClassifier
 
 from src.data import metrics as T          # torch-free regime_metrics + project_root
-from src.data.features_fireguard import FGDC_FEATURE_VARS
+from src.data.features import FGDC_FEATURE_VARS
 
 _WX_PREFIX = ("t2m_", "RH_", "surface_pressure_", "wind_", 
               "total_precipitation_", "soil_")
@@ -38,7 +38,7 @@ NEG_RATIO = 30           # train negatives kept per positive (per day), to bound
 def main():
     import logging
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-    log = logging.getLogger("train_gbt_fgdc")
+    log = logging.getLogger("train_gbt")
     smoke = "--smoke" in sys.argv
     # --drop f1,f2,... : train on FGDC_FEATURE_VARS minus these (feature ablation); --tag NAME suffixes the
     # output model so an ablation run never clobbers the production gbt_fireguard.joblib slot.

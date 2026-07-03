@@ -1,7 +1,7 @@
 #!/bin/bash
 # FGDC live SERVE — 2×/day wrapper for launchd (Ship A). Predicts t+1 from the forecast edge and publishes to the
-# HF Dataset, so the Space refreshes itself. Mirrors run_batch.sh's robustness (heartbeat + lock + catch-up on wake)
-# but is EPHEMERAL: it writes NOTHING to the cube (daily_job --mode live → extend_cube.serve_edge in memory), so a
+# HF Dataset, so the Space refreshes itself. Mirrors run_weekly.sh's robustness (heartbeat + lock + catch-up on wake)
+# but is EPHEMERAL: it writes NOTHING to the cube (serve --mode live → serve_engine.serve_edge in memory), so a
 # crash can't corrupt anything — it just doesn't update the heartbeat and the previous prediction stays live.
 #
 # Cadence: fired at ~08:00 and ~20:00 local (= ~06/18 UTC) by the LaunchAgent, plus RunAtLoad. The two slots give
@@ -40,7 +40,7 @@ if [[ -f "$HEARTBEAT" ]]; then
 fi
 
 echo "$(ts) === serve starting ===" >>"$LOG"
-if "$PY" scripts/daily_job.py --mode live >>"$LOG" 2>&1 && "$PY" scripts/push_serving.py >>"$LOG" 2>&1; then
+if "$PY" scripts/serve.py --mode live >>"$LOG" 2>&1 && "$PY" scripts/push_predictions.py >>"$LOG" 2>&1; then
   echo "$now" >"$HEARTBEAT"
   echo "$(ts) === serve OK (predicted + pushed; heartbeat updated) ===" >>"$LOG"
 else

@@ -1,18 +1,18 @@
-"""Compute the Group-A SOTA-gap-fill features on a coarse cube and append them.
+"""Build all engineered features on a coarse gold cube, in the correct order — one command.
 
-Implemented here (validated functions in src/data/feature_engineering.py):
-  kbdi                  - Keetch-Byram Drought Index (daily_rain ~= 2.9*tp, calibrated to AEMET).
-  spi_90d               - standardized 90-day precip anomaly vs day-of-year climatology (SPI proxy).
-  ndvi_anomaly, lai_anomaly - greenness anomaly vs seasonal climatology.
-  tpi, terrain_curvature    - DEM-derived terrain position / curvature (static).
-  time_since_last_fire  - days since the cell last burned (days_since_rain on is_fire).
-  burn_frequency_365d   - fire-days in the trailing 365 days.
+Merges the former `add_fire_context.py` (§E fire-context) and `add_engineered_features.py` (Group-A) into a
+single ordered pass (2026-07-03 refactor). **Order is load-bearing:** `fire_context()` MUST run first because
+`engineered()`'s `spi_90d` reads `precip_sum_90d` that `fire_context()` produces — running them out of order
+raised `KeyError: precip_sum_90d`. Merging them removes that footgun. Both stages are whole-cube (the features
+are causal/recursive: kbdi / precip_sum_* / time_since_last_fire / seasonal anomalies), append incrementally
+(mode='a') to bound memory, and are idempotent-ish via --overwrite.
 
-Deferred (need extra deps/handling, NOT here): WUI proximity (year-aware CLC), TWI (flow
-accumulation), HLI/solar-insolation (per-pixel latitude -> pyproj, absent locally).
+  fire_context : dist_to_fire, fire_upwind_exposure, precip_sum_{7,30,90,180,365}d
+  engineered   : tpi, terrain_curvature, kbdi, spi_90d, ndvi/lai_anomaly, emc_peak, ffwi, vpd_peak, hdw, fvc,
+                 dist_to_urban, aspect_southness/eastness, hli, time_since_last_fire, burn_frequency_365d,
+                 doy/dow sincos, national/regional holidays
 
-Appends each variable incrementally (mode='a') to bound memory. Idempotent-ish: use --overwrite
-to recompute. Usage:  python scripts/add_engineered_features.py --factor 4 [--overwrite]
+Usage:  python scripts/build_features.py --factor 4 --cube FireGuard [--overwrite]
 """
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ project_root = Path(__file__).resolve().parents[1]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 from src.data.feature_engineering import (
+    fire_distance_and_exposure,
     days_since_rain,
     equilibrium_moisture_content,
     fosberg_ffwi,
@@ -42,25 +43,70 @@ from src.data.feature_engineering import (
     vpd_kpa,
     hdw_index,
     day_of_year_sincos,
-    day_of_week_sincos
+    day_of_week_sincos,
 )
-from src.data.regions import CCAA_TO_SUBDIV        # shared region map (was duplicated here + update_edge)
+from src.data.regions import CCAA_TO_SUBDIV
 
 COMPRESSOR = Blosc(cname="zstd", clevel=3, shuffle=2)
 TP_TO_DAILY_MM = 2.9  # calibrated cumulative-mean -> daily-total factor (AEMET national ~640 mm/yr)
+FIRE_CONTEXT_VARS = ("dist_to_fire", "fire_upwind_exposure",
+                     "precip_sum_7d", "precip_sum_30d", "precip_sum_90d", "precip_sum_180d", "precip_sum_365d")
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--factor", type=int, default=4)
-    ap.add_argument("--overwrite", action="store_true")
-    ap.add_argument("--cube", type=str, default="IberFire", help="Name of the cube to append to (default: IberFire).")
+def fire_context(path: Path, overwrite: bool) -> None:
+    """§E spatial fire-context + trailing precip windows (former add_fire_context.py). Causal: from is_fire(t)."""
+    c = xr.open_zarr(path, consolidated=True)
+    if any(v in c.data_vars for v in FIRE_CONTEXT_VARS) and not overwrite:
+        raise SystemExit(f"{FIRE_CONTEXT_VARS} already present in {path}. Use --overwrite.")
 
-    args = ap.parse_args()
-    factor, cube, overwrite = args.factor, args.cube, args.overwrite
+    xc = c["x"].values.astype("float64")
+    yc = c["y"].values.astype("float64")
+    cell_km = abs(xc[1] - xc[0]) / 1000.0
+    no_fire_dist_km = float(np.hypot(c.sizes["y"], c.sizes["x"]) * cell_km)  # grid diagonal
+    nt, ny, nx = c.sizes["time"], c.sizes["y"], c.sizes["x"]
+    print(f"[fire-context] {path.name}: {nt} days, grid {ny}x{nx}, cell {cell_km:.0f} km, "
+          f"no-fire cap {no_fire_dist_km:.0f} km")
 
-    args = ap.parse_args()
-    path = project_root / "data" / "gold" / f"{cube}_coarse{factor}.zarr"
+    fire_all = c["is_fire"].values  # (T,y,x) uint8 — cheap (~0.4 GB)
+    dist = np.empty((nt, ny, nx), dtype="float32")
+    expo = np.empty((nt, ny, nx), dtype="float32")
+    for t in range(nt):
+        u = c["wind_u_mean"].isel(time=t).values  # per-day read (keeps memory low)
+        v = c["wind_v_mean"].isel(time=t).values
+        dist[t], expo[t] = fire_distance_and_exposure(fire_all[t], u, v, xc, yc, no_fire_dist_km)
+        if t % 1000 == 0:
+            print(f"  {t}/{nt}")
+
+    # Memory-bounded write: each whole-cube var is ~1.4 GB at 4 km, so bundling all 7 + a float64 cumsum in one
+    # Dataset peaked ~16 GB on a 17 GB box → swap/freeze. Write each var SEPARATELY (mode='a') and free between.
+    coords = {"time": c["time"], "y": c["y"], "x": c["x"]}
+
+    def _append(name: str, arr: np.ndarray, attrs: dict | None = None) -> None:
+        ds = xr.Dataset({name: (("time", "y", "x"), arr)}, coords=coords)
+        if attrs:
+            ds[name].attrs = attrs
+        ds = ds.chunk({"time": 1, "y": ny, "x": nx})
+        ds.to_zarr(path, mode="a", encoding={name: {"compressor": COMPRESSOR}}, consolidated=True, zarr_format=2)
+        print(f"  appended {name} {arr.shape} {arr.dtype}")
+
+    _append("dist_to_fire", dist,
+            {"units": "km", "description": "Distance to nearest fire cell on day t (0 on fire cells)."})
+    _append("fire_upwind_exposure", expo,
+            {"description": "(W.d)/|d|^2 downwind-exposure to nearest fire; >0 downwind, <0 upwind."})
+    del dist, expo, fire_all
+
+    precip_sum = np.cumsum(c["total_precipitation_mean"].values, axis=0, dtype="float64")  # float64 for accuracy
+    for N in (7, 30, 90, 180, 365):
+        win = precip_sum.astype("float32")                       # rows < N keep the partial cumsum
+        win[N:] = (precip_sum[N:] - precip_sum[:-N]).astype("float32")   # N-day trailing window
+        _append(f"precip_sum_{N}d", win)
+        del win
+    del precip_sum
+    print("[fire-context] done.")
+
+
+def engineered(path: Path, overwrite: bool) -> None:
+    """Group-A engineered features (former add_engineered_features.py). Reads precip_sum_90d from fire_context()."""
     c = xr.open_zarr(path, consolidated=True)
 
     coords = {"time": c["time"], "y": c["y"], "x": c["x"]}
@@ -108,7 +154,7 @@ def main() -> None:
     del tp, daily_rain, tmax
 
     # --- seasonal anomalies (SPI proxy + greenness) — CAUSAL climatology (prior years only): no train/test
-    #     leakage and identical to what's available at serve time (CHANGES.md / code-review #1). ---
+    #     leakage and identical to what's available at serve time. ---
     append("spi_90d", ("time", "y", "x"), seasonal_anomaly(c["precip_sum_90d"].values, doy, causal=True),
            {"description": "Standardized 90-day precip anomaly vs PRIOR-year day-of-year climatology (causal SPI proxy)."})
     append("ndvi_anomaly", ("time", "y", "x"), seasonal_anomaly(c["NDVI"].values, doy, causal=True),
@@ -176,18 +222,15 @@ def main() -> None:
     append("burn_frequency_365d", ("time", "y", "x"),
            rolling_sum_time(fire, 365).astype("float32"),
            {"description": "Number of fire-days in the trailing 365 days (NaN for first 364)."})
-    
+
     # --- calendar features (doy, dow, holidays) ---
     dates = c["time"].values; dates_tp1 = dates + np.timedelta64(1, "D")
     pd_dates = pd.DatetimeIndex(dates)
     pd_dates_tp1 = pd.DatetimeIndex(dates_tp1)
 
-    # The model predicts is_fire(t+1) from the row at t, so we expose calendar context for BOTH the
-    # feature day t AND the target day t+1. The +1 shift only matters for dow/holiday (doy(t)~=doy(t+1)),
-    # so doy is materialized once, for the target day. Every channel here is a per-day SCALAR except the
-    # regional-holiday flag, which varies in space by autonomous community. Per-day scalars are written as
-    # constant (time,y,x) planes via a zero-copy broadcast: zstd crushes a constant-per-day plane to ~nothing
-    # on disk, and keeping the (time,y,x) shape means the block-read trainer needs no special-casing.
+    # The model predicts is_fire(t+1) from the row at t, so we expose calendar context for BOTH the feature day t
+    # AND the target day t+1. Per-day scalars are written as constant (time,y,x) planes via zero-copy broadcast:
+    # zstd crushes a constant-per-day plane to ~nothing, and the (time,y,x) shape needs no trainer special-casing.
     import holidays as _hol
 
     T = len(dates)
@@ -213,10 +256,9 @@ def main() -> None:
     ]:
         append(name, ("time", "y", "x"), _plane(vec), {"description": desc})
 
-    # Holidays. national = Spain-wide (constant plane); regional = community-specific EXTRA days (subdiv
-    # holidays MINUS the national set, so national/regional channels are non-redundant), painted onto cells
-    # by AutonomousCommunities code. Both for t and t+1. CCAA_TO_SUBDIV (code -> ISO 3166-2:ES) is imported
-    # from src.data.regions (shared with update_edge).
+    # Holidays. national = Spain-wide (constant plane); regional = community-specific EXTRA days (subdiv holidays
+    # MINUS the national set, so channels are non-redundant), painted by AutonomousCommunities code. Both for t
+    # and t+1. CCAA_TO_SUBDIV (code -> ISO 3166-2:ES) is imported from src.data.regions (shared with update_edge).
     years = range(int(pd_dates.year.min()), int(pd_dates_tp1.year.max()) + 1)
     nat_days = set(_hol.Spain(years=years).keys())
 
@@ -243,8 +285,22 @@ def main() -> None:
                                "(beyond national); painted by AutonomousCommunities code."})
         del reg
 
-
     print("[enrich] done.")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Build all engineered features on a coarse cube, in order "
+                                             "(fire_context THEN engineered).")
+    ap.add_argument("--factor", type=int, default=4)
+    ap.add_argument("--cube", type=str, default="FireGuard", help="Cube name (default: FireGuard).")
+    ap.add_argument("--overwrite", action="store_true", help="Recompute even if the vars already exist.")
+    args = ap.parse_args()
+
+    path = project_root / "data" / "gold" / f"{args.cube}_coarse{args.factor}.zarr"
+    if not path.exists():
+        raise FileNotFoundError(path)
+    fire_context(path, args.overwrite)   # FIRST — produces precip_sum_* + dist_to_fire
+    engineered(path, args.overwrite)     # consumes precip_sum_90d for spi_90d
 
 
 if __name__ == "__main__":

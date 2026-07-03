@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 import datetime as _dt
 import numpy as np
 
-import scripts.fetch_firms as FB
+from src.data import fetch as FB
 from src.data.ingest import grid
 
 BRONZE = grid.ROOT / "data" / "bronze" / "fireguard" / "fire"

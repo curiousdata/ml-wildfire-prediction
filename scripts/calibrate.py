@@ -66,7 +66,7 @@ def main():
     stat_vals = {f: z[f].values.astype(np.float32)[land] for f in stat}
 
     tmax = Tn - 1 - HORIZON
-    cut = int((tmax + 1) * 0.8)                            # IDENTICAL split to train_gbt_fgdc → genuine held-out
+    cut = int((tmax + 1) * 0.8)                            # IDENTICAL split to train_gbt → genuine held-out
     val_days = list(range(cut, tmax + 1))
     stride = max(1, len(val_days) // (40 if smoke else 320))   # true-prevalence DAY sample (bounds runtime; full prevalence per day)
     val_days = val_days[::stride]

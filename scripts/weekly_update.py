@@ -4,7 +4,7 @@
 preliminary reanalysis, appends the cube up to the settle edge). The *true* monthly "batch" tier (final ERA5,
 overwrite behind a `final_watermark` seam) is BACKLOGGED — final≈ERA5T, not worth building (see the
 `lambda-architecture-fgdc` memory). The file/agent keep the "batch" name to avoid churning the live launchd
-wiring (`run_batch.sh` → `com.fireguard.batch`); read "batch" here as "the weekly settled-data refresh".
+wiring (`run_weekly.sh` → `com.fireguard.weekly`); read "batch" here as "the weekly settled-data refresh".
 
 
 The cube's data flows bronze → silver → gold → engineered, and **bronze is the source of truth**: every
@@ -12,20 +12,20 @@ raw day is cached as an npz that `build_silver` reads. So the batch job is:
 
   1. TOP UP BRONZE with the new SETTLED days (weather=Open-Meteo/ERA5, fire=FIRMS VIIRS, veg=MODIS/MPC),
      up to the watermark where the reanalysis/archive feeds are final.
-  2. EXTEND the medallion — silver (1 km) → gold (4 km, coarsen_fgdc) → engineered (add_engineered_features +
-     add_fire_context, whole-cube):
+  2. EXTEND the medallion — silver (1 km) → gold (4 km, coarsen) → engineered (build_features:
+     fire_context THEN engineered, whole-cube):
        * silver = **incremental APPEND** of just the new settled days (`build_silver --append`); ~10 s for a
          weekly window vs ~47 min for a full re-regrid of 14 yr. `--full` forces the one-time whole-rebuild
          baseline (e.g. first run, or after a schema change).
-       * gold = full `coarsen_fgdc` for now (reads 150 GB silver→4 km; far cheaper than re-regridding, and
-         proven). TODO: incremental `coarsen_fgdc.append_new` once measured + tested.
+       * gold = full `coarsen` for now (reads 150 GB silver→4 km; far cheaper than re-regridding, and
+         proven). TODO: incremental `coarsen.append_new` once measured + tested.
        * engineered MUST stay whole-cube — kbdi/precip_sum_*/time_since_last_fire are causal/recursive — but
          that's on the small 4 km gold. (The provisional ≤7-day edge to *today* is the DAILY job's concern —
          Option C; see the `fgdc-extend-cadence` memory.)
 
 This is the ONLY thing that mutates silver, by design. It runs on the DATA MACHINE (silver is 150 GB; it can't
 live on GH Actions/HF). Retraining/recalibration is deliberately NOT here — the model is stable; rerun
-train_gbt_fgdc/calibrate explicitly when you want to retrain.
+train_gbt/calibrate explicitly when you want to retrain.
 
 Per-feed settling lag (the watermark is the slowest feed that bounds "final"):
   * weather (ERA5-Land via Open-Meteo): archive lag ~5 d.
@@ -35,7 +35,7 @@ Per-feed settling lag (the watermark is the slowest feed that bounds "final"):
     composite, so a missing newest composite degrades gracefully (NaN → GBT-native).
 
 CLI:
-  python scripts/batch_job.py [--to YYYY-MM-DD] [--watermark-days N] [--from YYYY-MM-DD] [--full]
+  python scripts/weekly_update.py [--to YYYY-MM-DD] [--watermark-days N] [--from YYYY-MM-DD] [--full]
                               [--skip-ingest] [--skip-silver] [--skip-gold] [--skip-engineered]
                               [--dry-run] [--force]
 Run headless (MODIS veg fetch + the whole-cube rebuild are the slow parts).
@@ -71,7 +71,7 @@ WATERMARK_DAYS = 6                 # ERA5T settle edge (~5 d) with 1 d safety ma
                                    # quota-available test of that gap behavior (the seamless archive fills to today).
 FIRE_ARCHIVE_LAG_DAYS = 60         # FIRMS VIIRS SP archive horizon; newer than this → NRT
 FACTOR = 4
-log = logging.getLogger("batch_job")
+log = logging.getLogger("weekly_update")
 
 
 def _run(stage: str, argv: list[str]):
@@ -172,11 +172,10 @@ def main():
             _run("silver-append", [py, "-m", "src.data.ingest.build_silver", "--append", target_end])
     if args.full:                                          # one-time baseline: whole-cube coarsen + engineered (heavy)
         if not args.skip_gold:
-            _run("gold-full", [py, "-m", "src.data.ingest.coarsen_fgdc", "--factor", str(FACTOR), "--overwrite"])
-        if not args.skip_engineered:
-            for script in ("add_fire_context.py", "add_engineered_features.py"):   # fire_context FIRST (makes precip_sum_*)
-                _run("engineered", [py, str(PROJECT / "scripts" / script),
-                                    "--cube", "FireGuard", "--factor", str(FACTOR), "--overwrite"])
+            _run("gold-full", [py, "-m", "src.data.ingest.coarsen", "--factor", str(FACTOR), "--overwrite"])
+        if not args.skip_engineered:                       # one ordered pass (fire_context THEN engineered)
+            _run("engineered", [py, str(PROJECT / "scripts" / "build_features.py"),
+                                "--cube", "FireGuard", "--factor", str(FACTOR), "--overwrite"])
     elif not (args.skip_gold and args.skip_engineered):    # weekly: coarsen ONLY new days + engineer via edge
         _run("gold-edge", [py, str(PROJECT / "scripts" / "update_edge.py"), "--run", "--to", target_end])
 
