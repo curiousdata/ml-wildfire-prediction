@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  FGDC live SERVE LaunchAgent (Ship A). Fires at ~08:00 and ~20:00 LOCAL (= ~06/18 UTC in CEST), plus at load/login.
+  run_serve.sh predicts t+1 from the forecast edge and pushes to the HF Dataset (the Space reads it). The two slots
+  give morning-PRELIMINARY / evening-FINAL progressive refinement (both safely straddle the 17 UTC FIRMS afternoon
+  settle). run_serve.sh dedups RunAtLoad vs a slot (MIN_GAP_HRS) and catches up once on wake — a missed slot is not
+  backfilled (serve always predicts the latest). Ephemeral: writes nothing to the cube. User-session agent (needs
+  the repo/.venv/.env/network + the gold cube on this machine).
+
+  Install:   cp deploy/com.fireguard.serve.plist ~/Library/LaunchAgents/
+             launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.fireguard.serve.plist
+  Status:    launchctl print gui/$(id -u)/com.fireguard.serve
+  Run now:   launchctl kickstart -k gui/$(id -u)/com.fireguard.serve
+  Uninstall: launchctl bootout gui/$(id -u)/com.fireguard.serve && rm ~/Library/LaunchAgents/com.fireguard.serve.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.fireguard.serve</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/vladimir/ml-wildfire-prediction/scripts/run_serve.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/vladimir/ml-wildfire-prediction</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict>
+      <key>Hour</key>
+      <integer>8</integer>
+      <key>Minute</key>
+      <integer>0</integer>
+    </dict>
+    <dict>
+      <key>Hour</key>
+      <integer>20</integer>
+      <key>Minute</key>
+      <integer>0</integer>
+    </dict>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/vladimir/ml-wildfire-prediction/data/serving_store/serve.launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/vladimir/ml-wildfire-prediction/data/serving_store/serve.launchd.err.log</string>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>
