@@ -10,6 +10,40 @@ current dated entry — what was wrong, its impact, and the fix (or that it's fl
 
 ---
 
+## 2026-07-03 — `refactor/consolidate-scripts`: script consolidation + a clean rename pass
+
+After merging `fgdc-serving`, a housekeeping branch to pay down the sprawl the pivots left behind (17 top-level
+scripts, backwards `src→scripts` imports, stale "batch"/"extend_cube" names). Behaviour is unchanged throughout —
+every merge kept function bodies verbatim, and every step was compile+import verified.
+
+**Consolidation (many small scripts → coherent modules):**
+- `fetch_openmeteo` + `fetch_firms` → **`src/data/fetch.py`** (one external-feed layer). Fixes the smell where
+  `src/data/ingest/*` reached back into `scripts/`; prunes dead code (the three `demo()`s opened the deleted v1
+  cube; unused `fetch_grid`/`DAILY_MAP`). `fetch_effis` (orphan v1 EFFIS aux) → `archive/scripts/`.
+- `add_fire_context` + `add_engineered_features` → **`build_features.py`**, one ordered pass (`fire_context()` then
+  `engineered()`). The order was a real footgun — running them out of order raised `KeyError: precip_sum_90d`
+  (engineered's `spi_90d` reads fire_context's `precip_sum_90d`); merging removes it.
+- Experiments (`fgdc_ablation`, `baseline_panel`, `train_gbt_fc1_slice`) → **`scripts/experiments/`**; the dead v1
+  `coarsen.py` → `archive/scripts/`. Production `scripts/` drops **17 → 9**. (The three weather ingesters were
+  assessed and deliberately NOT merged — distinct sources, ~700 lines, a merge would be an incoherent grab-bag.)
+
+**Rename pass (clean · factual · up-to-date · minimal):** `extend_cube→serve_engine` (it no longer extends the
+cube — it's the ephemeral serve engine, Option C retired), `daily_job→serve`, `batch_job→weekly_update` (it's the
+weekly *speed* tier, not batch), `run_batch.sh→run_weekly.sh`, `com.fireguard.batch→com.fireguard.weekly`;
+dropped dead v1 suffixes now that v1 is gone: `train_gbt_fgdc→train_gbt`, `coarsen_fgdc→coarsen`,
+`features_fireguard→features`; `push_serving→push_predictions`, `ingest_weather_cds→ingest_weather_master`. All
+imports/subprocess paths/shell wrappers/plist refs rewired; the launchd batch agent was booted out and
+re-bootstrapped as `com.fireguard.weekly` (RunAtLoad no-op'd — cube current). Docs (this file, CLAUDE.md module
+map, README) updated to the new names.
+
+### Bugs found & fixed
+- **macOS `sed` arg-list failure (self-inflicted, caught immediately):** the first rename pass renamed the files
+  via `git mv` but a `sed -i '' … $FILES` invocation silently didn't apply the in-file reference updates, leaving
+  renamed files whose contents still referenced old module names. Caught by a post-step grep; re-applied robustly
+  with `find … -exec sed` and re-verified (zero stale tokens, all modules import).
+
+---
+
 ## 2026-06-28 — `fgdc-serving`: architecture settled — batch / speed / serve along a data-VINTAGE axis
 
 Worked the Lambda mapping with the user until it clicked. The classic batch/speed split is about *compute

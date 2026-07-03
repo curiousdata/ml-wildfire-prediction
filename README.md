@@ -43,8 +43,8 @@ risk drivers attributed per day.
 ```
 src/data/            feature set (features.py), datasets, feature engineering, ingest/ (FGDC)
 src/models/          model definitions (legacy U-Net factory)
-scripts/             train_gbt.py · calibrate_gbt.py · gbt_compare.py · measurement_floor.py
-                     tune_gbt.py · coarsen.py · add_engineered_features.py · daily_job.py · live_slice.py
+scripts/             build_features.py · train_gbt.py · calibrate.py · serve.py · serve_engine.py
+                     push_predictions.py · weekly_update.py · update_edge.py · rechunk.py · experiments/
 docker/monolith/     Streamlit monitor (app_live.py) + Dockerfile
 space/               deployable Hugging Face Space (read-only renderer)
 models/              gbt_coarse4.* (production GBT + calibrator + metadata)
