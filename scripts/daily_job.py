@@ -46,10 +46,7 @@ REGIME_KM = 6.0
 # day only after its ~13:30 UTC afternoon pass settles in FIRMS (~3 h). Scoring t before that uses only the night
 # pass = a partial, off-distribution label (see the `fire-label-timing` memory).
 FIRMS_AFTERNOON_SETTLE_UTC = 17     # UTC hour after which day t's afternoon SNPP pass is reliably in FIRMS
-CCAA = {1: "Andalucía", 2: "Aragón", 3: "Asturias", 4: "Baleares", 6: "Cantabria",
-        7: "Castilla y León", 8: "Castilla-La Mancha", 9: "Cataluña", 10: "C. Valenciana",
-        11: "Extremadura", 12: "Galicia", 13: "Madrid", 14: "Murcia", 15: "Navarra",
-        16: "País Vasco", 17: "La Rioja"}
+from src.data.regions import CCAA_NAMES as CCAA        # shared region map (code -> display name)
 
 
 def latest_complete_fire_date(now_utc=None):

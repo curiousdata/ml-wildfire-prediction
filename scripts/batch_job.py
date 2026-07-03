@@ -1,5 +1,12 @@
 """Batch job — the FGDC v2 authoritative cadence (settled data only; touches silver). Cadence: WEEKLY.
 
+⚠️ NAME vs LAMBDA ROLE: in the Lambda-architecture vocabulary this is actually the **SPEED tier** (weekly ERA5T
+preliminary reanalysis, appends the cube up to the settle edge). The *true* monthly "batch" tier (final ERA5,
+overwrite behind a `final_watermark` seam) is BACKLOGGED — final≈ERA5T, not worth building (see the
+`lambda-architecture-fgdc` memory). The file/agent keep the "batch" name to avoid churning the live launchd
+wiring (`run_batch.sh` → `com.fireguard.batch`); read "batch" here as "the weekly settled-data refresh".
+
+
 The cube's data flows bronze → silver → gold → engineered, and **bronze is the source of truth**: every
 raw day is cached as an npz that `build_silver` reads. So the batch job is:
 

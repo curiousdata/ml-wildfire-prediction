@@ -32,6 +32,7 @@ import pandas as pd
 import xarray as xr
 
 from src.data import feature_engineering as FE
+from src.data.regions import CCAA_TO_SUBDIV        # shared region map (was duplicated here + add_engineered)
 
 GOLD = PROJECT / "data" / "gold" / "FireGuard_coarse4.zarr"
 SILVER = PROJECT / "data" / "silver" / "FireGuard.zarr"
@@ -39,8 +40,6 @@ TAIL = 365                          # longest hard lookback (precip_sum_365d, bu
 TP_TO_DAILY_MM = 2.9                # must match add_engineered_features.TP_TO_DAILY_MM
 FIRE_THR = 0.5                      # is_fire>0.5 = burned (time_since_last_fire)
 EPS = 1e-6                          # must match seasonal_anomaly eps
-CCAA_TO_SUBDIV = {1: "AN", 2: "AR", 3: "AS", 4: "IB", 6: "CB", 7: "CL", 8: "CM", 9: "CT", 10: "VC",
-                  11: "EX", 12: "GA", 13: "MD", 14: "MC", 15: "NC", 16: "PV", 17: "RI"}
 
 
 def _causal_anomaly_edge(z, var, i0, n_new, doy_all, new_vals=None):
