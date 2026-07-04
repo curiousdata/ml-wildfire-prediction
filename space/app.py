@@ -327,8 +327,7 @@ def build_map_html(prob_bytes, fire_bytes, regime_bytes, shape, issue, target, d
     for lat, lon, rad, tip in danger_clusters(prob, regime, ccaa, json.loads(drivers_json or "{}"), x, y, fwd):
         folium.Circle([lat, lon], radius=max(rad, 5000), color="#ffd9b0", weight=1, opacity=0.4,
                       fill=True, fill_opacity=0.04, tooltip=folium.Tooltip(tip, sticky=True)).add_to(m)
-    m.get_root().html.add_child(folium.Element(_legend(issue, target)))
-    return m._repr_html_()
+    return m._repr_html_()   # legend is rendered as a Streamlit strip below the map (reliable vs iframe overlay)
 
 
 def regions_of(mask, ccaa):
@@ -365,7 +364,11 @@ st.markdown("""<style>
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
   html, body, [class*="css"] { font-family:'Inter',system-ui,-apple-system,sans-serif; }
   .stApp { background:#0d1117; }
-  .block-container { padding-top:1.1rem; padding-bottom:1rem; max-width:1400px; }
+  [data-testid="stHeader"], header[data-testid="stHeader"] { display:none !important; height:0 !important; }
+  [data-testid="stToolbar"] { display:none !important; }
+  .block-container { padding-top:1.7rem; padding-bottom:1rem; max-width:1400px; }
+  .fg-legend { display:flex; align-items:center; gap:14px; margin-top:8px; font-size:.8rem; color:#8b98a8; flex-wrap:wrap; }
+  .fg-legend b { color:#c9d4e0; }
   iframe { border-radius:14px; }
   .fg-title { font-size:1.7rem; font-weight:800; color:#eef2f7; letter-spacing:-.01em; line-height:1.05; }
   .fg-sub { font-size:.82rem; color:#7d8aa0; margin-top:3px; letter-spacing:.03em; }
@@ -423,6 +426,14 @@ html = build_map_html(np.ascontiguousarray(prob, np.float32).tobytes(),
                       np.ascontiguousarray(regime, np.int8).tobytes(), prob.shape,
                       S["issue"], S["target"], json.dumps(S.get("drivers") or {}), idxmap, bounds)
 components.html(html, height=620)
+st.markdown(
+    f"<div class='fg-legend'><span>Risk for <b>{S['target']}</b></span>"
+    "<span style='height:8px;width:120px;border-radius:4px;display:inline-block;"
+    "background:linear-gradient(90deg,rgba(245,68,28,.45),#f5441c 12%,#ff9626 55%,#fff6be);'></span>"
+    "<span>low → high</span>"
+    "<span><span style='color:#96f5ff;font-size:13px;'>■</span> burning now</span>"
+    f"<span>· hover a circle for the danger-area chance &amp; causes · issued {S['issue']}</span></div>",
+    unsafe_allow_html=True)
 
 
 # ---------- store-watcher: full rerun only when a NEW prediction lands ----------
