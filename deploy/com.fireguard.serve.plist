@@ -1,12 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  FGDC live SERVE LaunchAgent (Ship A). Fires at ~08:00 and ~20:00 LOCAL (= ~06/18 UTC in CEST), plus at load/login.
-  run_serve.sh predicts t+1 from the forecast edge and pushes to the HF Dataset (the Space reads it). The two slots
-  give morning-PRELIMINARY / evening-FINAL progressive refinement (both safely straddle the 17 UTC FIRMS afternoon
-  settle). run_serve.sh dedups RunAtLoad vs a slot (MIN_GAP_HRS) and catches up once on wake — a missed slot is not
-  backfilled (serve always predicts the latest). Ephemeral: writes nothing to the cube. User-session agent (needs
-  the repo/.venv/.env/network + the gold cube on this machine).
+  FGDC live SERVE LaunchAgent (Ship A). Fires 4×/day at ~06:15, 07:15, 18:15, 19:15 LOCAL (CEST), plus at
+  load/login. Each slot is timed ~30 min after a VIIRS pass settles in FIRMS NRT (≈3 h latency), so every run
+  folds the newest active-fire pass into today's dist_to_fire before predicting t+1 — the "use the freshest
+  info as soon as we can" cadence. Three VIIRS birds (S-NPP + NOAA-20 + NOAA-21) → 6 daily passes in two clusters:
+  the night cluster (~00:00-01:30 UTC → picked up ~04/05 UTC = 06/07 local) and the afternoon cluster
+  (~12:00-13:30 UTC → ~16/17 UTC = 18/19 local). NOAA-21 LEADS the group so its passes settle earliest — the 4 slots
+  (timed to the LATEST pass of each cluster, S-NPP) already fold in the earlier NOAA-20/21 passes, so the 3rd bird
+  needs NO new slots. The first three runs land PRELIMINARY; the 19:15 run (>17 UTC settle) is the FINAL for t+1.
+  run_serve.sh predicts + pushes to the HF Dataset (the Space reads it), dedups RunAtLoad vs a slot (MIN_GAP_MIN,
+  sub-hour so the 1 h-apart pairs both fire) and catches up once on wake — a missed slot is not backfilled (serve
+  always predicts the latest). Ephemeral: writes nothing to the cube. User-session agent (needs the
+  repo/.venv/.env/network + the gold cube on this machine).
 
   Install:   cp deploy/com.fireguard.serve.plist ~/Library/LaunchAgents/
              launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.fireguard.serve.plist
@@ -31,15 +37,27 @@
   <array>
     <dict>
       <key>Hour</key>
-      <integer>8</integer>
+      <integer>6</integer>
       <key>Minute</key>
-      <integer>0</integer>
+      <integer>15</integer>
     </dict>
     <dict>
       <key>Hour</key>
-      <integer>20</integer>
+      <integer>7</integer>
       <key>Minute</key>
-      <integer>0</integer>
+      <integer>15</integer>
+    </dict>
+    <dict>
+      <key>Hour</key>
+      <integer>18</integer>
+      <key>Minute</key>
+      <integer>15</integer>
+    </dict>
+    <dict>
+      <key>Hour</key>
+      <integer>19</integer>
+      <key>Minute</key>
+      <integer>15</integer>
     </dict>
   </array>
   <key>EnvironmentVariables</key>

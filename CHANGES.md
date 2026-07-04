@@ -10,6 +10,56 @@ current dated entry — what was wrong, its impact, and the fix (or that it's fl
 
 ---
 
+## 2026-07-04 (later) — third VIIRS bird at SERVE (NOAA-21) → 6 passes/day
+
+Extended the serve union to **NOAA-21** — a drop-in third VIIRS bird, same 375 m product/algorithm as S-NPP and
+NOAA-20 (zero harmonization). First measured it: a math-only cell-day density test over 835 days (2024-01-17 →
+2026-04-30, 4 km land grid, `n21_density.py`) showed **+25.6% fire-positive cell-days on top of the shipped
+S-NPP+NOAA-20 baseline** (2-pass 12,656 → 4-pass 19,565 → 6-pass 24,582), **stable ~26%/yr** (2024 +26.9 · 2025
++24.2 · 2026 +27.5). Complementary not redundant (N21-vs-S-NPP-alone +52%, ~like N20); diminishing returns as
+expected (1→2 birds +55%, 2→3 +26%). Since it's the identical VIIRS product it inherits NOAA-20's density→skill,
+so — like NOAA-20 — it went straight in as a serve union (`ingest_fire.SRC_NRT3="VIIRS_NOAA21_NRT"`;
+`serve_engine._band_raw` now loops all three birds). NOAA-21 is **NRT-only** (no SP archive) but its NRT is kept
+for the full 2024-01→ history. **No schedule change:** NOAA-21 *leads* the constellation, so its passes settle
+earliest — the 4 slots (timed to the latest pass of each cluster, S-NPP) already fold in the earlier NOAA-20/21
+data. The Control Center coverage strip now shows **three birds / 6 passes**; the completeness gate is unchanged
+(S-NPP's ~13:30 UTC afternoon pass is still the last). Cube `is_fire` history stays S-NPP (train-side multi-bird
+retrain still its own deferred branch).
+
+## 2026-07-04 — dual-satellite fire at SERVE (VIIRS S-NPP + NOAA-20) + a 4×/day pass-timed schedule
+
+Added the **second VIIRS satellite (NOAA-20)** to the live serve. This is a **measured improvement in the input
+signal, not a train/serve hack**: NOAA-20's ~50-min-offset overpasses catch real fires S-NPP misses (the density
+study found +57% fire cell-days), and the skill ablation — evaluated against the *more complete* 4-pass truth,
+which is what actually happens in the world — showed that feeding that denser fire into the **current** model
+*raises* skill with **zero retraining: new-ignition AP +0.013, spread AP +0.010** (config D vs the 2-pass
+baseline). A better observation of reality yields better predictions. (Top-K alert precision is ~flat; the small
+residual there is what the deferred **train-side** 4-pass retrain — config B/C — fully recovers, but the retrain is
+an *addition* on top of an already-net-positive signal, not a prerequisite.) The serve now unions **both VIIRS
+satellites' active-fire detections**, and the launchd schedule fires **four times a day**, each slot timed to fold
+the freshest pass into the prediction as soon as FIRMS makes it usable. Motivation (user): *use the latest
+available information to correct the prediction — as soon as we can, as good as we can.*
+
+**Serve union (`serve_engine._band_raw`, `ingest_fire.SRC_NRT2`):** added `SRC_NRT2 = "VIIRS_NOAA20_NRT"` and made
+the serve's FIRMS fetch loop over `(SRC_NRT, SRC_NRT2)` per window; `fires_to_grid` unions the two birds' points
+naturally (any detection in a cell → fire). This refreshes today's **`dist_to_fire`** (a top-3 driver) off all
+available passes and densifies the "burning now" display (+1 fire source). The **cube's `is_fire` history stays
+S-NPP** (train-side 4-pass adoption remains its own deferred branch), so only the serve edge is 4-pass — but that
+lands mainly via today's `dist_to_fire`, which is the driver config D leans on. Verified live: NOAA-20 adds ~+70%
+detections on a sample day; the RunAtLoad smoke-test ran the full path (predicted 07-05 from 07-04's edge,
+`live-prelim`, pushed to the HF Dataset).
+
+**4×/day pass-timed schedule (`com.fireguard.serve.plist`, `run_serve.sh`):** VIIRS over Spain (≈0° lon → overpass
+≈ UTC) gives a night pair (NOAA-20 ~00:40, S-NPP ~01:30 UTC) and an afternoon pair (~12:40, ~13:30 UTC); with
+FIRMS NRT's ~3 h latency each settles ~04/05 and ~16/17 UTC. Slots set to **06:15 / 07:15 / 18:15 / 19:15 local
+(CEST)** to land just after each. The first three are PRELIMINARY; the 19:15 run (>17 UTC settle) is the FINAL for
+t+1 — the S-NPP afternoon pass (~13:30 UTC, the last of the four) still sets the completeness gate, so
+`FIRMS_AFTERNOON_SETTLE_UTC=17` is unchanged. The RunAtLoad + slot dedup guard was converted from a 4 h floor to a
+**sub-hour `MIN_GAP_MIN=45`** so the 1 h-apart pass-pair slots each still fire while a login-time RunAtLoad next to
+a slot is still deduped. Agent booted out + re-bootstrapped; new schedule confirmed loaded.
+
+---
+
 ## 2026-07-03 — `refactor/consolidate-scripts`: script consolidation + a clean rename pass
 
 After merging `fgdc-serving`, a housekeeping branch to pay down the sprawl the pivots left behind (17 top-level

@@ -14,8 +14,14 @@ import base64
 import io
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+try:                                          # local pass times for a Spanish command center (DST-correct)
+    from zoneinfo import ZoneInfo
+    MADRID = ZoneInfo("Europe/Madrid")
+except Exception:
+    MADRID = None
 
 import folium
 import numpy as np
@@ -51,6 +57,16 @@ CAUSE_MAP = [
     (("popdens", "dist_to_roads_mean", "dist_to_roads_stdev", "dist_to_urban"), "close to people & roads"),
     (("burn_frequency_365d",), "recent fire history"),
 ]
+# VIIRS overpass schedule over Spain (~0° lon → overpass clock ≈ UTC), as UTC minutes-of-day per bird: a night
+# (descending) + an afternoon (ascending) pass. Three co-planar birds within ~1 h: NOAA-21 leads, then NOAA-20,
+# then Suomi-NPP (last → it sets the completeness gate). A pass becomes FETCHABLE ~FIRMS_SETTLE_H after overpass
+# (FIRMS NRT latency) — that's when the serve can fold it in. NOAA-21 leads, so its data is ready before the others'.
+SAT_PASSES = [
+    ("Suomi-NPP", [("overnight", 1 * 60 + 30), ("afternoon", 13 * 60 + 30)]),
+    ("NOAA-20",   [("overnight", 0 * 60 + 40), ("afternoon", 12 * 60 + 40)]),
+    ("NOAA-21",   [("overnight", 0 * 60 + 0),  ("afternoon", 12 * 60 + 0)]),
+]
+FIRMS_SETTLE_H = 3.0
 BAND_COLOR = {"High": "#ef4444", "Elevated": "#f59e0b", "Moderate": "#eab308", "Low": "#4ade80"}
 CCAA = {1: "Andalucía", 2: "Aragón", 3: "Asturias", 4: "Baleares", 6: "Cantabria",
         7: "Castilla y León", 8: "Castilla-La Mancha", 9: "Cataluña", 10: "C. Valenciana",
@@ -335,18 +351,23 @@ def regions_of(mask, ccaa):
     return [CCAA.get(int(c), f"R{int(c)}") for c in codes]
 
 
-def ago(iso_or_mtime):
-    """Human 'time ago' at MINUTE granularity (no ticking seconds)."""
+def _to_dt(iso_or_mtime):
+    """Parse an ISO string (naive → UTC) or an epoch float into a tz-aware UTC datetime (None on failure)."""
     if iso_or_mtime is None:
-        return "—"
+        return None
     try:
         if isinstance(iso_or_mtime, str):
             t = datetime.fromisoformat(iso_or_mtime)
-            if t.tzinfo is None:
-                t = t.replace(tzinfo=timezone.utc)
-        else:
-            t = datetime.fromtimestamp(iso_or_mtime, timezone.utc)
+            return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+        return datetime.fromtimestamp(float(iso_or_mtime), timezone.utc)
     except Exception:
+        return None
+
+
+def ago(iso_or_mtime):
+    """Human 'time ago' at MINUTE granularity (no ticking seconds)."""
+    t = _to_dt(iso_or_mtime)
+    if t is None:
         return "—"
     s = (datetime.now(timezone.utc) - t).total_seconds()
     if s < 120:
@@ -356,6 +377,75 @@ def ago(iso_or_mtime):
     if s < 172800:
         return f"{int(s // 3600)}h ago"
     return f"{int(s // 86400)}d ago"
+
+
+def _local_hm(dt_utc):
+    """UTC datetime → 'HH:MM' in Europe/Madrid (falls back to UTC if zoneinfo/tzdata is unavailable)."""
+    return (dt_utc.astimezone(MADRID) if MADRID else dt_utc).strftime("%H:%M")
+
+
+def satellite_status(fetched, issue, now=None):
+    """Time-expectation model of VIIRS active-fire coverage for the issue day — the state behind the LIVE/PARTIAL
+    pill. Each of the four passes (2 birds × night/afternoon) becomes FETCHABLE at overpass + FIRMS_SETTLE_H:
+      • 'in'    — settled AND the prediction was built at/after that → we hold it (✓)
+      • 'miss'  — settled but the prediction predates it → we're BEHIND (⚠); the ONLY thing that makes us PARTIAL
+      • 'later' — not fetchable yet (hasn't happened/settled) → expected, neutral (◦), no strike against us
+    LIVE = the prediction already includes every pass fetchable as of *now* (the freshest that can exist — the
+    normal all-day state). PARTIAL = a settled pass isn't in yet (e.g. the evening run didn't fire). Pure
+    time-derived from the manifest's `fetched_at` + `issue`; no serve-side signal needed."""
+    now = now or datetime.now(timezone.utc)
+    fdt = _to_dt(fetched)
+    day = _to_dt(issue) or now
+    day0 = day.replace(hour=0, minute=0, second=0, microsecond=0)
+    sats, any_miss, later_settles = [], False, []
+    for name, passes in SAT_PASSES:
+        rows = []
+        for label, mod in passes:
+            over = day0 + timedelta(minutes=mod)
+            settle = over + timedelta(hours=FIRMS_SETTLE_H)
+            if now < settle:
+                state = "later"; later_settles.append(settle)
+            elif fdt is None or fdt >= settle:      # None (replay/no stamp) → assume held, so history reads LIVE
+                state = "in"
+            else:
+                state = "miss"; any_miss = True
+            rows.append({"label": label, "time": _local_hm(settle), "state": state})   # show DATA-AVAILABILITY time
+                                                                                        # (overpass + FIRMS lag), Madrid
+        sats.append({"name": name, "passes": rows})
+    npass = sum(len(p) for _, p in SAT_PASSES)               # 3 birds × 2 = 6
+    if any_miss:
+        cap = "newer passes have landed — refresh pending"
+    elif later_settles:
+        cap = f"latest passes in · next update ~{_local_hm(min(later_settles))}"
+    else:
+        cap = f"all {npass} passes in · final for today"
+    return {"live": not any_miss, "status": "LIVE" if not any_miss else "PARTIAL", "sats": sats, "caption": cap}
+
+
+SAT_TIP = ("The three VIIRS satellites — Suomi-NPP, NOAA-20, NOAA-21 — each scan Spain twice a day on staggered "
+           "orbits, so together they catch fires the others would miss. We issue a first forecast from the earliest "
+           "pass and refine it as each later pass arrives. Times shown are when the data from that pass becomes "
+           "available in Madrid — about 3 hours after the overpass (NASA FIRMS processing lag).")
+
+
+def sat_strip_html(sat, updated):
+    """Render the satellite-coverage panel on ONE line: lead label · per-bird units (name + overnight/afternoon
+    chips, each chip's time = when that pass's data is available) · LIVE/PARTIAL pill · a '?' help tooltip."""
+    ic = {"in": "✓", "miss": "⚠", "later": "◦"}
+    units = []
+    for s in sat["sats"]:
+        chips = "".join(
+            f"<span class='cell {p['state']}'><span class='cell-l'>{p['label']}</span>"
+            f"<span class='cell-i'>{ic[p['state']]}</span><span class='cell-t'>{p['time']}</span></span>"
+            for p in s["passes"])
+        units.append(f"<span class='sat-u'><span class='sat-name'>{s['name']}</span>{chips}</span>")
+    cls = "on" if sat["live"] else "off"
+    dot = "●" if sat["live"] else "◐"
+    return (f"<div class='sat-panel'><span class='sat-lead'>🛰 VIIRS active-fire coverage</span>"
+            f"{''.join(units)}"
+            f"<span class='sat-pill {cls}'>{dot} {sat['status']}<small>updated {updated}</small></span>"
+            f"<span class='sat-info' tabindex='0' title='{SAT_TIP}'>?<span class='sat-tip'>{SAT_TIP}</span></span>"
+            f"</div>")
 
 
 # ---------------------------- UI ----------------------------
@@ -374,6 +464,40 @@ st.markdown("""<style>
   .fg-sub { font-size:.82rem; color:#7d8aa0; margin-top:3px; letter-spacing:.03em; }
   .fg-status { text-align:right; font-size:1.05rem; font-weight:700; line-height:1.1; }
   .fg-status-age { display:block; font-size:.8rem; color:#7d8aa0; font-weight:400; margin-top:3px; }
+  /* satellite-coverage panel — ONE line: lead · per-bird units · pill · ? help */
+  .sat-panel { display:flex; align-items:center; gap:8px 18px; flex-wrap:wrap; margin:14px 0 2px;
+    background:rgba(22,27,34,.55); backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+    border:1px solid rgba(255,255,255,.06); border-radius:14px; padding:10px 16px; }
+  .sat-lead { display:flex; align-items:center; gap:7px; font-size:.68rem; font-weight:700;
+    text-transform:uppercase; letter-spacing:.07em; color:#8b98a8; }
+  .sat-u { display:flex; align-items:center; gap:6px; }
+  .sat-name { font-size:.8rem; font-weight:700; color:#c9d4e0; }
+  .cell { display:inline-flex; align-items:center; gap:5px; font-size:.77rem; padding:3px 9px; border-radius:999px;
+    border:1px solid rgba(255,255,255,.07); background:rgba(255,255,255,.02); }
+  .cell-l { font-size:.58rem; text-transform:uppercase; letter-spacing:.03em; color:#7d8aa0; }
+  .cell-i { font-weight:800; font-size:.8rem; }
+  .cell-t { color:#c9d4e0; font-weight:600; font-variant-numeric:tabular-nums; }
+  .cell.in    { border-color:rgba(74,222,128,.28); background:rgba(74,222,128,.06); }
+  .cell.in .cell-i { color:#4ade80; }
+  .cell.miss  { border-color:rgba(240,160,32,.34); background:rgba(240,160,32,.08); }
+  .cell.miss .cell-i, .cell.miss .cell-t { color:#f0a020; }
+  .cell.later { opacity:.5; }
+  .cell.later .cell-i { color:#7d8aa0; }
+  .sat-pill { margin-left:auto; display:flex; align-items:center; gap:9px; white-space:nowrap;
+    font-size:1rem; font-weight:800; letter-spacing:.02em; padding:6px 15px; border-radius:999px; }
+  .sat-pill small { font-size:.72rem; font-weight:500; color:#8b98a8; letter-spacing:0; }
+  .sat-pill.on  { color:#4ade80; background:rgba(74,222,128,.10); border:1px solid rgba(74,222,128,.30); }
+  .sat-pill.off { color:#f0a020; background:rgba(240,160,32,.10); border:1px solid rgba(240,160,32,.30); }
+  .sat-info { position:relative; display:inline-flex; align-items:center; justify-content:center; flex-shrink:0;
+    width:20px; height:20px; border-radius:50%; border:1px solid rgba(255,255,255,.2); color:#8b98a8;
+    font-size:.72rem; font-weight:700; cursor:help; }
+  .sat-info:hover, .sat-info:focus { color:#eef2f7; border-color:rgba(255,255,255,.45); outline:none; }
+  .sat-tip { position:absolute; bottom:calc(100% + 10px); right:0; width:320px; padding:12px 14px;
+    background:#161b22; border:1px solid rgba(255,255,255,.13); border-radius:11px; text-align:left;
+    font-size:.77rem; font-weight:400; line-height:1.5; color:#c9d4e0; letter-spacing:0; text-transform:none;
+    box-shadow:0 10px 32px rgba(0,0,0,.55); opacity:0; visibility:hidden; transform:translateY(4px);
+    transition:opacity .12s ease, transform .12s ease; z-index:1000; pointer-events:none; }
+  .sat-info:hover .sat-tip, .sat-info:focus .sat-tip { opacity:1; visibility:visible; transform:translateY(0); }
   .src-k { font-size:.68rem; text-transform:uppercase; letter-spacing:.06em; color:#6f7d90; }
   .src-v { font-size:.9rem; color:#c9d4e0; font-weight:600; }
   .card { background:rgba(22,27,34,.55); backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
@@ -402,20 +526,16 @@ prob, regime, fire = S["prob"], S["regime"], S["today_fire"]
 land = regime > 0
 fire = np.where(land, fire, 0.0)   # FIRMS covers the whole Iberian bbox; only show fire within our (Spain-only)
                                    # prediction coverage — Portugal has fire but no forecast (adding it = backlog)
-prelim = S.get("prelim")
 n_fire = int((fire > 0.5).sum())
 
 
-# ---------- title + status (60 s refresh for the 'updated' stamp; no ticking clock) ----------
+# ---------- title + satellite-coverage strip (60 s fragment: re-derives pass state & LIVE/PARTIAL as time moves) ----------
 @st.fragment(run_every=60)
 def topbar():
-    c1, c2 = st.columns([4, 2])
-    c1.markdown("<div class='fg-title'>Fire Guard <span style='color:#9fb3c8;font-weight:700'>Control Center</span></div>"
+    st.markdown("<div class='fg-title'>Fire Guard <span style='color:#9fb3c8;font-weight:700'>Control Center</span></div>"
                 "<div class='fg-sub'>next-day wildfire risk · Spain</div>", unsafe_allow_html=True)
-    dot, col = ("◐ PRELIMINARY", "#f0a020") if prelim else ("● LIVE", "#4ade80")
-    c2.markdown(f"<div class='fg-status' style='color:{col}'>{dot}"
-                f"<span class='fg-status-age'>updated {ago(S['fetched_at'] or S['mtime'])}"
-                f"{' · refines ~17 UTC' if prelim else ''}</span></div>", unsafe_allow_html=True)
+    sat = satellite_status(S["fetched_at"] or S["mtime"], S["issue"])
+    st.markdown(sat_strip_html(sat, ago(S["fetched_at"] or S["mtime"])), unsafe_allow_html=True)
 
 
 topbar()
@@ -496,6 +616,6 @@ with cT:
         f"<div class='rowline'>top regions · {top_line}</div>{drv_html}</div>", unsafe_allow_html=True)
 
 st.write("")
-st.markdown("<div class='foot'>Calibrated gradient-boosted trees on the Fire Guard Datacube v2 · "
-            "preliminary in the morning, final after the afternoon satellite pass (~17 UTC) · "
+st.markdown("<div class='foot'>Calibrated gradient-boosted trees on the Fire Guard Datacube v2 · three-satellite "
+            "VIIRS active fire (Suomi-NPP + NOAA-20 + NOAA-21), refreshed as each pass lands · "
             "base © CARTO / OpenStreetMap.</div>", unsafe_allow_html=True)

@@ -42,18 +42,19 @@ STORE = M.project_root / "data" / "serving_store"
 MODEL = M.project_root / "models" / "gbt_fireguard.joblib"
 CALIBRATOR = M.project_root / "models" / "gbt_fireguard.calibrator.joblib"
 REGIME_KM = 6.0
-# Live completeness gate: is_fire[t] is the UTC-day UNION of both SNPP passes, so day t is COMPLETE as a feature
-# day only after its ~13:30 UTC afternoon pass settles in FIRMS (~3 h). Scoring t before that uses only the night
-# pass = a partial, off-distribution label (see the `fire-label-timing` memory).
+# Live completeness gate: the served is_fire[t] is the UTC-day UNION of all VIIRS passes (S-NPP + NOAA-20 + NOAA-21
+# = 6/day), so day t is COMPLETE as a feature day only after its LAST pass — the ~13:30 UTC SNPP afternoon overpass —
+# settles in FIRMS (~3 h). Scoring t before that has only the earlier passes = a partial, off-distribution label (see
+# the `fire-label-timing` memory). NOAA-20 (~12:40) and NOAA-21 (leads, ~12:00) are earlier, so SNPP still sets the gate.
 FIRMS_AFTERNOON_SETTLE_UTC = 17     # UTC hour after which day t's afternoon SNPP pass is reliably in FIRMS
 from src.data.regions import CCAA_NAMES as CCAA        # shared region map (code -> display name)
 
 
 def latest_complete_fire_date(now_utc=None):
     """Latest UTC date usable as a COMPLETE feature day `t` (then predict t+1). is_fire[t] is the whole-UTC-day
-    union of both SNPP passes, so `t` isn't complete until its ~13:30 UTC afternoon pass settles in FIRMS
-    (~FIRMS_AFTERNOON_SETTLE_UTC UTC). Before that, today has only its night pass → latest complete is yesterday
-    (a same-day nowcast); after, it's today (a true next-day forecast). See the `fire-label-timing` memory."""
+    union of all VIIRS passes (S-NPP + NOAA-20), so `t` isn't complete until its last (~13:30 UTC SNPP afternoon)
+    pass settles in FIRMS (~FIRMS_AFTERNOON_SETTLE_UTC UTC). Before that, today has only its earlier passes → latest
+    complete is yesterday (a same-day nowcast); after, it's today (a true next-day forecast). See `fire-label-timing`."""
     now = now_utc or datetime.now(timezone.utc)
     today = now.date()
     return today if now.hour >= FIRMS_AFTERNOON_SETTLE_UTC else today - _dt.timedelta(days=1)

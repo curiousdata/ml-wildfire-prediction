@@ -88,9 +88,11 @@ development log in `CHANGES.md`.
 
 ## Roadmap
 
-FGDC v2 is the shipped, serving system. Active/queued directions: adopt **dual-satellite (S-NPP + NOAA-20) fire**
-(measured +57% label density → a consistent next-day-skill lift), forecast-weather complement features, and a
-real-time nowcast path. See `ROADMAP.md` and `CHANGES.md`.
+FGDC v2 is the shipped, serving system. The live serve unions **three VIIRS birds (S-NPP + NOAA-20 + NOAA-21 → 6
+passes/day)** — each added bird measurably densifies the fire signal (NOAA-20 +57%, NOAA-21 a further +26% cell-days)
+for a consistent next-day-skill lift. Queued directions: fold the multi-satellite label into *training* (currently
+serve-side only), Sentinel-3 SLSTR as a further complementary source, forecast-weather features, and a real-time
+nowcast path. See `ROADMAP.md` and `CHANGES.md`.
 
 ## References
 
@@ -131,7 +133,8 @@ real-time nowcast path. See `ROADMAP.md` and `CHANGES.md`.
 
 - **ERA5 / ERA5-Land** reanalysis — Copernicus Climate Data Store (ECMWF), accessed via **Open-Meteo** (archive +
   forecast APIs) and directly for the batch master.
-- **NASA FIRMS** active fire — VIIRS S-NPP (VNP14IMG) and NOAA-20 (VJ114).
+- **NASA FIRMS** active fire — VIIRS S-NPP (VNP14IMG), NOAA-20 (VJ114) and NOAA-21 (VJ214); the live serve unions all
+  three birds (6 passes/day).
 - **MODIS** vegetation & land-surface temperature (NDVI/EVI, LAI/FAPAR, LST) via the **Microsoft Planetary
   Computer**.
 - **Copernicus EFFIS** burned-area perimeters (auxiliary/offline).

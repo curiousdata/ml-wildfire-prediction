@@ -35,6 +35,10 @@ from src.data.ingest import grid
 BRONZE = grid.ROOT / "data" / "bronze" / "fireguard" / "fire"
 BBOX_LL = (-10.0, 35.0, 5.0, 44.5)            # W,S,E,N — Spain + margin
 SRC_ARCHIVE, SRC_NRT = "VIIRS_SNPP_SP", "VIIRS_SNPP_NRT"
+SRC_NRT2 = "VIIRS_NOAA20_NRT"                  # 2nd VIIRS bird (~50 min offset)
+SRC_NRT3 = "VIIRS_NOAA21_NRT"                  # 3rd VIIRS bird (leads the group) → serve unions all 3 = 6 daily passes.
+                                              # Proven +25.6% cell-days over the 2-bird baseline, stable ~26%/yr 2024-26
+                                              # (n21_density.py); NOAA-21 is NRT-only (no SP archive) but NRT keeps full history.
 CONF_KEEP = {"n", "h"}                         # VIIRS confidence: keep nominal + high (drop low)
 
 

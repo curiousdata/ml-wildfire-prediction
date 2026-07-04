@@ -1,14 +1,16 @@
 #!/bin/bash
-# FGDC live SERVE — 2×/day wrapper for launchd (Ship A). Predicts t+1 from the forecast edge and publishes to the
+# FGDC live SERVE — 4×/day wrapper for launchd (Ship A). Predicts t+1 from the forecast edge and publishes to the
 # HF Dataset, so the Space refreshes itself. Mirrors run_weekly.sh's robustness (heartbeat + lock + catch-up on wake)
 # but is EPHEMERAL: it writes NOTHING to the cube (serve --mode live → serve_engine.serve_edge in memory), so a
 # crash can't corrupt anything — it just doesn't update the heartbeat and the previous prediction stays live.
 #
-# Cadence: fired at ~08:00 and ~20:00 local (= ~06/18 UTC) by the LaunchAgent, plus RunAtLoad. The two slots give
-# the progressive-refinement pattern (see the fire-label-timing memory): morning = PRELIMINARY (today's afternoon
-# SNPP pass not yet settled), evening = FINAL (re-predicts the same t+1 with today's fire complete). A short
-# MIN_GAP_HRS guard stops RunAtLoad + a scheduled slot from double-firing; a missed slot just runs once on wake
-# (past predictions are moot — serve always predicts the LATEST, never backfills).
+# Cadence: fired at ~06:15, 07:15, 18:15, 19:15 local by the LaunchAgent, plus RunAtLoad. Each slot lands ~30 min
+# after one of the four VIIRS passes (S-NPP + NOAA-20, night + afternoon) settles in FIRMS NRT, so every run folds
+# the freshest active-fire pass into today's dist_to_fire before predicting t+1 (progressive refinement — see the
+# fire-label-timing memory): the first three are PRELIMINARY (today's afternoon SNPP pass not yet settled), the
+# 19:15 run (>17 UTC) is FINAL with today's fire complete. A sub-hour MIN_GAP_MIN guard stops RunAtLoad + a
+# scheduled slot from double-firing while still letting the 1 h-apart pairs both run; a missed slot just runs once
+# on wake (past predictions are moot — serve always predicts the LATEST, never backfills).
 set -uo pipefail
 REPO="/Users/vladimir/ml-wildfire-prediction"
 PY="$REPO/.venv/bin/python"
@@ -16,7 +18,8 @@ STORE="$REPO/data/serving_store"
 HEARTBEAT="$STORE/.serve_last_success"      # epoch seconds of the last successful serve+push
 LOG="$STORE/serve_cron.log"
 LOCK="$STORE/.serve_lock"
-MIN_GAP_HRS=4                               # skip if a serve succeeded < this ago (dedup RunAtLoad vs a slot)
+MIN_GAP_MIN=45                              # skip if a serve succeeded < this many minutes ago (dedup RunAtLoad vs a
+                                            # slot); sub-hour so the 1 h-apart pass-pair slots each still fire
 mkdir -p "$STORE"
 cd "$REPO" || { echo "$(date -u +%FT%TZ) cannot cd $REPO" >>"$LOG"; exit 1; }
 ts() { date -u +%FT%TZ; }
@@ -33,9 +36,9 @@ trap 'rmdir "$LOCK" 2>/dev/null' EXIT
 
 now=$(date +%s)
 if [[ -f "$HEARTBEAT" ]]; then
-  gap=$(( (now - $(cat "$HEARTBEAT")) / 3600 ))
-  if (( gap < MIN_GAP_HRS )); then
-    echo "$(ts) last serve ${gap}h ago (< ${MIN_GAP_HRS}h) — skip (dedup)" >>"$LOG"; exit 0
+  gap=$(( (now - $(cat "$HEARTBEAT")) / 60 ))
+  if (( gap < MIN_GAP_MIN )); then
+    echo "$(ts) last serve ${gap}min ago (< ${MIN_GAP_MIN}min) — skip (dedup)" >>"$LOG"; exit 0
   fi
 fi
 

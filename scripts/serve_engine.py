@@ -52,7 +52,8 @@ def _band_raw(z, band, gx, gy):
     _, _, dly, _ = OM.fetch_grid_range(start, end, ["precipitation_sum"], step=FETCH_STEP, source="archive")
     rg = OM.make_regridder(np.asarray(plon, float), np.asarray(plat, float), gx, gy)
     precip = dly["precipitation_sum"]                                # (n_band, n_pts)
-    # FIRMS NRT in ≤5-day windows (the area API caps day_range at 5), concat, split per acq_date
+    # FIRMS NRT in ≤5-day windows (the area API caps day_range at 5), concat, split per acq_date. THREE VIIRS birds —
+    # S-NPP + NOAA-20 + NOAA-21 (all 6 daily passes) → union at the grid (fires_to_grid: any detection in a cell = fire).
     key = os.getenv("FIRMS_MAP_KEY")
     fdf = None
     if key:
@@ -60,7 +61,8 @@ def _band_raw(z, band, gx, gy):
         parts, i = [], 0
         while i < len(bd):
             w = min(5, len(bd) - i)
-            parts.append(IF._filter_conf(FB.fetch_firms(key, bd[i].isoformat(), src=IF.SRC_NRT, bbox=IF.BBOX_LL, days=w)))
+            for src in (IF.SRC_NRT, IF.SRC_NRT2, IF.SRC_NRT3):     # VIIRS S-NPP + NOAA-20 + NOAA-21
+                parts.append(IF._filter_conf(FB.fetch_firms(key, bd[i].isoformat(), src=src, bbox=IF.BBOX_LL, days=w)))
             i += w
         fdf = pd.concat([p for p in parts if p is not None and not p.empty], ignore_index=True) if parts else None
 
