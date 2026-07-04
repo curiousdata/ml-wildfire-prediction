@@ -30,13 +30,27 @@ ASSETS = ROOT / "display_assets.npz"
 SERVING_REPO = os.getenv("FIREGUARD_SERVING_REPO", "curiousdata/fireguard-serving")
 FORCE_LOCAL = os.getenv("FIREGUARD_LOCAL_STORE") == "1"
 CELL_KM2 = 16.0
-HIGH, ELEV, MOD = 0.50, 0.20, 0.05    # calibrated-probability ALERT tiers (text panel bands)
+# ALERT tiers re-anchored to PREVALENCE multiples (base rate ≈7e-4): moderate ≈7×, elevated ≈28×, high ≈100×.
+# (The old 0.5/0.2/0.05 almost never triggered — calibrated per-cell probs are tiny.)
+HIGH, ELEV, MOD = 0.07, 0.02, 0.005
 # Map colour ramp = LOG scale over the calibrated-probability dynamic range. Per-cell next-day probs are tiny and
 # heavy-tailed (prevalence ≈ 7e-4; median ~1e-4, p99 ~4e-3, rare cells → 0.6), so a LINEAR ramp anchored to the
 # alert tiers shows almost nothing. Log-ramp from RAMP_FLOOR (≈3× prevalence; below → transparent so quiet days
 # stay dark) to RAMP_CAP (≈100× prevalence → full red). Absolute → comparable across days.
-RAMP_FLOOR, RAMP_CAP = 0.0013, 0.012  # FLOOR = pixel count; CAP low so the field runs hot into red (dramatic)
+RAMP_FLOOR, RAMP_CAP = 0.0013, 0.013  # FLOOR = pixel count; CAP = how hot the field runs (rolled back — was too red)
 _LF = float(np.log(RAMP_FLOOR)); _LS = float(np.log(RAMP_CAP) - np.log(RAMP_FLOOR))
+CLUSTER_THR = 0.006                    # cells above this seed/join the danger-area watershed
+CLUSTER_MIN_P = 0.10                   # surface every area with ≥ this aggregate P(≥1 ignition) — the (only) knob
+# feature → human cause phrase, in the RISK-RAISING direction (for the danger-area hover; never show raw names)
+CAUSE_MAP = [
+    (("dist_to_fire", "fire_upwind_exposure", "time_since_last_fire"), "near active fire"),
+    (("kbdi", "spi_90d", "days_since_rain", "precip_sum_90d", "precip_sum_180d"), "very dry ground"),
+    (("t2m_max", "t2m_mean"), "extreme heat"),
+    (("ffwi", "hdw", "vpd_peak", "wind_speed_max", "rh_min"), "hot-dry-windy weather"),
+    (("emc_peak", "ndvi_anomaly", "fvc", "lai_anomaly", "ndvi"), "dry, abundant fuel"),
+    (("popdens", "dist_to_roads_mean", "dist_to_roads_stdev", "dist_to_urban"), "close to people & roads"),
+    (("burn_frequency_365d",), "recent fire history"),
+]
 BAND_COLOR = {"High": "#ef4444", "Elevated": "#f59e0b", "Moderate": "#eab308", "Low": "#4ade80"}
 CCAA = {1: "Andalucía", 2: "Aragón", 3: "Asturias", 4: "Baleares", 6: "Cantabria",
         7: "Castilla y León", 8: "Castilla-La Mancha", 9: "Cataluña", 10: "C. Valenciana",
@@ -185,17 +199,17 @@ def gather(a, idx):
 
 
 def risk_rgba(prob):
-    """LOG-scaled, prevalence-anchored ramp. Per-cell probs span ~1e-4→0.6, so colour position is log(p): below
-    RAMP_FLOOR (≈3× prevalence) → transparent (quiet days & the noise floor stay dark); RAMP_FLOOR→RAMP_CAP
-    log-ramps yellow→orange→red. Absolute (comparable across days) but reveals the whole heavy-tailed field, so a
-    genuinely-elevated day lights up instead of clipping to black (the linear tier-anchored ramp did the latter)."""
+    """LOG-scaled, prevalence-anchored HEAT ramp (blackbody: brightest = hottest = most dangerous). Colour position
+    is log(p): below RAMP_FLOOR → transparent (quiet days & noise floor stay dark); RAMP_FLOOR→RAMP_CAP ramps
+    dark-red → orange → BRIGHT YELLOW, with a CONTRAST alpha (low risk dim/receding, high risk bright/popping).
+    Absolute (day-comparable) but reveals the whole heavy-tailed field instead of clipping to black."""
     p = np.clip(np.nan_to_num(prob), 0, 1)
     with np.errstate(divide="ignore"):
         t = np.clip((np.log(np.maximum(p, 1e-12)) - _LF) / _LS, 0.0, 1.0)   # 0 at FLOOR, 1 at CAP (log position)
-    Y = np.array([255, 176, 32.]); O = np.array([255, 88, 8.]); R = np.array([244, 33, 28.])  # amber→orange-red→red
+    DR = np.array([245, 68, 28.]); OR = np.array([255, 150, 38.]); YL = np.array([255, 246, 190.])  # VIVID red-orange→orange→white-yellow
     lo = (t < 0.5)[..., None]; f = np.where(t < 0.5, t * 2, (t - 0.5) * 2)[..., None]
-    rgb = np.where(lo, Y, O) * (1 - f) + np.where(lo, O, R) * f
-    a = np.where(p > RAMP_FLOOR, np.clip(110 + 135 * (t ** 0.40), 0, 245), 0.0)   # opaque field (drama); dark below floor
+    rgb = np.where(lo, DR, OR) * (1 - f) + np.where(lo, OR, YL) * f
+    a = np.where(p > RAMP_FLOOR, np.clip(140 + 108 * (t ** 0.8), 0, 250), 0.0)   # bright + opaque; value-driven brightness now
     rgba = np.zeros((*p.shape, 4), np.uint8)
     rgba[..., :3] = rgb.astype(np.uint8); rgba[..., 3] = a.astype(np.uint8)
     return rgba
@@ -208,6 +222,60 @@ def fire_rgba(mask):
     rgba[..., 0] = np.where(m, 150, 0); rgba[..., 1] = np.where(m, 245, 0)
     rgba[..., 2] = np.where(m, 255, 0); rgba[..., 3] = np.where(m, 255, 0)
     return rgba
+
+
+def _causes(feature_list):
+    """Top ≤2 human-readable cause phrases from a regime's driver feature names (risk-raising direction)."""
+    out = []
+    for feats, phrase in CAUSE_MAP:
+        if any(f in feature_list for f in feats) and phrase not in out:
+            out.append(phrase)
+    return out[:2]
+
+
+def danger_clusters(prob, regime, ccaa, drivers, x, y, fwd):
+    """WATERSHED the risk surface into hotspot-centred 'danger areas' — basins around local maxima with boundaries
+    in the low-risk valleys, so adjacent hotspots stay SEPARATE (unlike a threshold+dilation blob). Per area →
+    (lat, lon, radius_m, tooltip) with aggregate P(≥1 ignition)=1−Π(1−pᵢ) + 1-2 plain-language causes."""
+    from scipy.ndimage import label, maximum_filter, gaussian_filter, watershed_ift
+    land = regime > 0
+    mask = (prob > CLUSTER_THR) & land
+    if not mask.any():
+        return []
+    ps = gaussian_filter(prob.astype(np.float64), 1.2)                       # smooth → stable, meaningful peaks
+    lbl, n = label((maximum_filter(ps, size=5) <= ps) & mask)               # each hotspot (local max) seeds a basin
+    if n == 0:
+        return []
+    cost = (255 * (1.0 - np.clip(ps / max(ps.max(), 1e-9), 0, 1))).astype(np.uint8)   # high risk = low cost
+    ws = watershed_ift(cost, lbl.astype(np.int32))                          # hotspot assignment over the whole plane
+    blobs, nb = label(mask)                                                 # contiguous elevated regions → LOCAL extent
+    # a danger area = one CONTIGUOUS blob split by hotspot basin: local (bounded by the blob) AND peak-separated.
+    # (watershed_ift alone assigns scattered far cells to one basin → a peninsula-sized "cluster".)
+    key = np.where(mask, blobs.astype(np.int64) * (int(n) + 1) + ws.astype(np.int64), 0)
+    ig = _causes([d.get("feature") for d in (drivers.get("ignition") or [])])
+    sp = _causes([d.get("feature") for d in (drivers.get("spread") or [])])
+    dx = abs(x[1] - x[0])
+    out = []
+    for uid in np.unique(key):
+        if uid == 0:
+            continue
+        cells = key == uid
+        pagg = 1.0 - float(np.prod(1.0 - np.clip(prob[cells], 0, 0.99)))
+        if pagg < CLUSTER_MIN_P:
+            continue
+        rr, cc = np.where(cells)
+        lon, lat = fwd.transform(float(x[cc].mean()), float(y[rr].mean()))
+        rad = max((x[cc.max()] - x[cc.min()]) / 2, abs(y[rr.max()] - y[rr.min()]) / 2, dx) + dx / 2
+        reg_spread = float((regime[cells] == 2).mean()) > 0.5
+        rc = ccaa[cells]; rc = rc[rc > 0]
+        region = CCAA.get(int(np.bincount(rc).argmax()), "") if rc.size else ""
+        causes = sp if reg_spread else ig
+        what = "fire spread" if reg_spread else "a new fire"
+        tip = (f"{region + ' — ' if region else ''}up to ~{pagg * 100:.0f}% chance of {what} here tomorrow"
+               + (" · " + " · ".join(causes) if causes else ""))
+        out.append((pagg, float(lat), float(lon), float(rad), tip))
+    out.sort(reverse=True)                        # most dangerous first (no count cap — MIN_P governs)
+    return [(lat, lon, rad, tip) for _, lat, lon, rad, tip in out]
 
 
 def alpha_over(b, t):
@@ -230,7 +298,7 @@ def _legend(issue, target):
       <div style="font-size:10.5px;letter-spacing:.07em;color:#8b98a8;margin-bottom:6px;text-transform:uppercase;">
         Risk for {target}</div>
       <div style="height:8px;width:156px;border-radius:4px;
-        background:linear-gradient(90deg,rgba(255,232,74,.12),#ffe84a 18%,#ff8c00 60%,#dc1a1a);"></div>
+        background:linear-gradient(90deg,rgba(245,68,28,.45),#f5441c 12%,#ff9626 55%,#fff6be);"></div>
       <div style="display:flex;justify-content:space-between;width:156px;font-size:10px;color:#7d8aa0;margin-top:3px;">
         <span>low</span><span>high</span></div>
       <div style="margin-top:8px;font-size:11px;color:#8b98a8;">
@@ -239,18 +307,26 @@ def _legend(issue, target):
 
 
 @st.cache_data(show_spinner=False)
-def build_map_html(prob_bytes, fire_bytes, shape, issue, target, _idxmap, _bounds):
-    """Build the folium map once and cache its HTML. Dark schematic base + tier-anchored risk glow + cyan fire."""
+def build_map_html(prob_bytes, fire_bytes, regime_bytes, shape, issue, target, drivers_json, _idxmap, _bounds):
+    """Dark base + red-tinted risk-glow raster, hover-able danger-area circles, and pulsing active-fire markers."""
     prob = np.frombuffer(prob_bytes, np.float32).reshape(shape)
     fire = np.frombuffer(fire_bytes, np.float32).reshape(shape)
+    regime = np.frombuffer(regime_bytes, np.int8).reshape(shape)
     (la0, lo0), (la1, lo1) = _bounds
     m = folium.Map(location=[(la0 + la1) / 2, (lo0 + lo1) / 2], zoom_start=6, tiles="cartodbdark_matter",
                    zoom_control=True, control_scale=False)
+    # risk glow (dark base shows through where risk≈0 — no land tint), softened; crisp cyan active fire on top
     pr = gather(prob, _idxmap); fr = np.nan_to_num(gather(fire, _idxmap))
-    risk = np.array(Image.fromarray(risk_rgba(pr)).filter(ImageFilter.GaussianBlur(0.8)))   # tight glow, keeps punch
-    layer = alpha_over(risk, fire_rgba(fr > 0.5))                                            # fire stays crisp on top
+    risk = np.array(Image.fromarray(risk_rgba(pr)).filter(ImageFilter.GaussianBlur(0.8)))
+    layer = alpha_over(risk, fire_rgba(fr > 0.5))                        # cyan fire crisp on top
     url = "data:image/png;base64," + base64.b64encode(png(layer)).decode()
     folium.raster_layers.ImageOverlay(image=url, bounds=[[la0, lo0], [la1, lo1]], opacity=0.96, zindex=2).add_to(m)
+    a = np.load(ASSETS); x = a["x"].astype(float); y = a["y"].astype(float); ccaa = a["ccaa"].astype(int)
+    fwd = Transformer.from_crs("EPSG:3035", "EPSG:4326", always_xy=True)
+    # hover-able danger areas (aggregate probability + plain-language causes)
+    for lat, lon, rad, tip in danger_clusters(prob, regime, ccaa, json.loads(drivers_json or "{}"), x, y, fwd):
+        folium.Circle([lat, lon], radius=max(rad, 5000), color="#ffd9b0", weight=1, opacity=0.4,
+                      fill=True, fill_opacity=0.04, tooltip=folium.Tooltip(tip, sticky=True)).add_to(m)
     m.get_root().html.add_child(folium.Element(_legend(issue, target)))
     return m._repr_html_()
 
@@ -343,8 +419,9 @@ topbar()
 
 # ---------- MAP: full-width hero ----------
 html = build_map_html(np.ascontiguousarray(prob, np.float32).tobytes(),
-                      np.ascontiguousarray(fire, np.float32).tobytes(), prob.shape,
-                      S["issue"], S["target"], idxmap, bounds)
+                      np.ascontiguousarray(fire, np.float32).tobytes(),
+                      np.ascontiguousarray(regime, np.int8).tobytes(), prob.shape,
+                      S["issue"], S["target"], json.dumps(S.get("drivers") or {}), idxmap, bounds)
 components.html(html, height=620)
 
 

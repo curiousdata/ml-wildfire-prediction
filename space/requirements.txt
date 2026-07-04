@@ -5,4 +5,5 @@ folium>=0.15
 numpy>=1.24
 pillow
 pyproj>=3.6
+scipy>=1.10              # danger-area clustering (ndimage.label + binary_dilation)
 huggingface_hub>=0.24   # Ship A: read predictions from the HF Dataset (latest.json manifest + grid)

@@ -20,7 +20,7 @@ FireGuard is several coordinated pieces, not one script:
 | **FGDC — Fire Guard Datacube** | The analysis-ready data product: a medallion cube (bronze → silver → gold) **recollected from operational, append-daily providers** (VIIRS active fire, ERA5/ERA5-Land weather, MODIS vegetation, human-settlement & terrain layers), coarsened to a 4 km working grid with **135 engineered features** and a max-pooled `is_fire` label. |
 | **FG Pipeline** | The data-engineering engine that builds and maintains FGDC — the medallion transforms plus a **Lambda architecture along a data-*vintage* axis** (forecast → ERA5T → final): a weekly *speed* refresh that appends newly-settled days, an incremental edge engine that recomputes only the new days' features (bit-identical to a whole-cube pass), and an ephemeral *serve* path. |
 | **FG Forecaster** | The model: a **point-wise gradient-boosted tree** (`HistGradientBoostingClassifier`) that maps a cell's features at day *t* to a calibrated probability of fire at *t+1*, with metrics reported separately for **new ignitions** vs **fire spread**. |
-| **FG Control Center** | The live operational monitor — a Hugging Face Space that renders tomorrow's risk over fresh satellite imagery, shows what's burning now, and attributes the dominant risk drivers per day. |
+| **FG Control Center** | The live operational monitor — a map-first Hugging Face Space that renders tomorrow's risk as a heat glow on a dark schematic base, with **hover-able danger areas** (aggregate probability + plain-language causes), today's active fire, and per-day drivers. |
 
 Two supporting layers sit inside the pipeline: **FG Live Edge** (fetch today's feeds → build the feature vector in
 memory → predict t+1 → publish predictions to a Hugging Face Dataset the Control Center reads) and **FG Lab** (an
@@ -139,7 +139,7 @@ real-time nowcast path. See `ROADMAP.md` and `CHANGES.md`.
 - **JRC Global Human Settlement Layer** — GHS-POP (population), GHS-BUILT-S (built-up).
 - **CORINE Land Cover** (Copernicus) · **Copernicus DEM** (elevation) · **OpenStreetMap** via Geofabrik
   (roads/railways/waterways) · **Natura 2000** protected areas.
-- **NASA GIBS** — satellite-imagery basemap tiles for the Control Center.
+- **CartoDB (dark_matter) / OpenStreetMap** — dark schematic basemap tiles for the Control Center.
 
 ### Software & frameworks
 
