@@ -50,6 +50,43 @@ model, same metric. Reproduce with `scripts/fgdc_ablation.py` (`--groups` for le
 
 ---
 
+### 2026-07-04 — Multi-satellite fire label: dense-short vs long-sparse vs stitch → **crop DROP · stitch TIE (serve-side already captured it)**
+- **Idea:** with three VIIRS birds now available (S-NPP + NOAA-20 from 2018 + NOAA-21 from 2024), how should the
+  **training label** use them? Three target-definitions: `snpp` (S-NPP only, all years — what we ship), `stitch`
+  (`fire6` = S-NPP∪N20∪N21, union-as-available, all years), `crop` (`fire6` but 2024+ only — the dense era).
+- **What it solves / hypothesis:** the live serve is FIXED 6-pass (we union all three birds at inference), so the
+  open question is whether the *training* label should also go multi-satellite, and whether the 3rd bird's density
+  justifies discarding pre-2024 years. Prior (NOAA-20 matrix): "source ≫ years" — but that held only because cropping
+  to 2018 still left 6 years. Hypothesis: stitch ≥ crop > snpp.
+- **Setup:** cube `FireGuard_coarse4_t200` (5265 d); the 4 label-dependent features
+  (`dist_to_fire`/`fire_upwind_exposure`/`time_since_last_fire`/`burn_frequency_365d`) **recomputed per fire
+  timeline** (build_features recipe); all other features label-independent. **All three configs scored on the SAME
+  6-pass held-out set** (2025-06-01→2026-04-29, ~10.4 M cell-days, 12,136 pos) vs **6-pass truth** — only training
+  data differs. Prod GBT (neg 30:1, seed 0), `regime_metrics`. Repro:
+  `scripts/experiments/multisat_fire_fetch.py` → `multisat_label_matrix.py`
+  (+ `multisat_density.py` for the label-density companion). Result JSON: `reports/multisat_label_matrix.json`.
+- **Result** (new-ignition AP is the hard regime):
+
+  | config | train label / years | new-ign AP | spread AP | overall AP | ROC | prec@K |
+  |---|---|---|---|---|---|---|
+  | **snpp** | S-NPP, all years *(shipped: 2p-train/6p-serve)* | 0.5270 | 0.9631 | 0.7095 | 0.9263 | 0.3196 |
+  | **stitch** | fire6, all years (add sats as available) | 0.5268 | 0.9618 | 0.7100 | 0.9264 | **0.3331** |
+  | **crop** | fire6, 2024+ only | 0.5047 | 0.9093 | 0.6712 | 0.9110 | 0.2788 |
+
+  Δ new-ign AP: **stitch−snpp −0.0002 · crop−snpp −0.0223 · stitch−crop +0.0221.**
+  Companion density (`multisat_density.py`, 2024-01→2026-04): 2-pass 12,656 → 4-pass 19,565 (+54.6%) → 6-pass 24,582
+  (+25.6%), N21 stable ~26%/yr.
+- **Verdict:** **crop-2024 = DROP** (−0.022 new-ign AP, −0.054 spread — ~1.4 yr / one fire season is data-starved;
+  years dominate the 3rd bird's +26% density). **stitch = TIE on ranking AP**, buying only +0.0135 prec@K → the
+  density benefit is delivered at **serve** (6-pass `dist_to_fire`), which the shipped model already gets (config D);
+  the feature→risk mapping is density-invariant, so retraining the label barely moves AP. **Train-side multi-sat
+  retrain = LOW PRIORITY** (justified only if top-K alert precision becomes the product goal). Revises the
+  going-in prediction that stitch would win.
+- **Caveats:** single seed (neg-subsample noise ≈ ±0.0014 → the stitch−snpp tie and the +0.0135 prec@K sit near the
+  noise floor; crop's −0.022 is far beyond it); one test year (2025–26); N21 uses NRT (no SP archive) while
+  S-NPP/N20 use SP — minor vintage mismatch; absolute AP (~0.53) not comparable to the 4-pass-truth study's ~0.57
+  (different truth + window).
+
 ### 2026-06-26 — GEFS d+1 forecast weather (+CAPE) complement → **KEEP (proven; real but modest)**
 - **Idea:** add tomorrow's *forecast* of the weather block (the GEFS run issued at t, valid t+1) as **extra**
   channels alongside the observed t-weather (complement, not substitute). 19 forecast-weather + 2 CAPE = 21

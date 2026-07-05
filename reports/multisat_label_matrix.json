@@ -1,0 +1,18 @@
+{
+  "experiment": "multisat_label_matrix",
+  "date": "2026-07-04",
+  "question": "3-VIIRS-bird training-label ablation: dense-but-short (6-pass 2024+) vs long-but-sparse (S-NPP all-years) vs stitch (all-years, add sats as available). Serve is fixed 6-pass, so all configs scored on the SAME 6-pass held-out set.",
+  "test_window": "2025-06-01..2026-04-29",
+  "eval_truth": "6-pass (SNPP∪N20∪N21)",
+  "test_cells": 10363293,
+  "test_pos": 12136,
+  "model": "HistGradientBoostingClassifier (prod params, neg 30:1, seed 0)",
+  "configs": {
+    "snpp":   {"train": "S-NPP, all years (SHIPPED: 2p-train / 6p-serve = config D)", "new_ignition_ap": 0.5270, "spread_ap": 0.9631, "overall_ap": 0.7095, "roc": 0.9263, "prec_at_k": 0.3196},
+    "stitch": {"train": "fire6 stitch, all years (add sats as available)",           "new_ignition_ap": 0.5268, "spread_ap": 0.9618, "overall_ap": 0.7100, "roc": 0.9264, "prec_at_k": 0.3331},
+    "crop":   {"train": "fire6, 2024+ only",                                          "new_ignition_ap": 0.5047, "spread_ap": 0.9093, "overall_ap": 0.6712, "roc": 0.9110, "prec_at_k": 0.2788}
+  },
+  "deltas_new_ignition_ap": {"stitch_minus_snpp": -0.0002, "crop_minus_snpp": -0.0223, "stitch_minus_crop": 0.0221},
+  "verdict": "crop-2024 decisively worse (data-starved, years dominate); stitch ties shipped on ranking AP (+0.0135 prec@K only) -> density value delivered at SERVE not by retraining -> train-side retrain LOW PRIORITY.",
+  "seed_noise_ap": 0.0014
+}

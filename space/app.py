@@ -441,9 +441,9 @@ def sat_strip_html(sat, updated):
         units.append(f"<span class='sat-u'><span class='sat-name'>{s['name']}</span>{chips}</span>")
     cls = "on" if sat["live"] else "off"
     dot = "●" if sat["live"] else "◐"
-    return (f"<div class='sat-panel'><span class='sat-lead'>🛰 VIIRS active-fire coverage</span>"
+    return (f"<div class='sat-panel'><span class='sat-lead'>🛰 VIIRS</span>"
             f"{''.join(units)}"
-            f"<span class='sat-pill {cls}'>{dot} {sat['status']}<small>updated {updated}</small></span>"
+            f"<span class='sat-pill {cls}'>{dot} {sat['status']}<small>{updated}</small></span>"
             f"<span class='sat-info' tabindex='0' title='{SAT_TIP}'>?<span class='sat-tip'>{SAT_TIP}</span></span>"
             f"</div>")
 
