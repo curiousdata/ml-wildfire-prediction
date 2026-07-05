@@ -1,0 +1,18 @@
+{
+  "experiment": "multisat_geo_correlation",
+  "source": "MTG-FCI FDeM (EO:EUM:DAT:0682), hourly sample",
+  "window": "2025-08-01..2025-08-31",
+  "n_days": 31,
+  "viirs6_cell_days": 2636,
+  "geo_cell_days": 3075,
+  "overlap": 1341,
+  "geo_recall_of_viirs_pct": 50.87253414264036,
+  "viirs_recall_of_geo_pct": 43.609756097560975,
+  "jaccard": 0.30686498855835237,
+  "viirs_unique": 1295,
+  "geo_unique": 1734,
+  "geo_unique_pct_over_viirs": 65.7814871016692,
+  "geo_gap_unique": 1503,
+  "density_gain_pct": 65.7814871016692,
+  "per_day_count_corr": 0.9725712511597481
+}
