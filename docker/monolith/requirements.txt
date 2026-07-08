@@ -1,25 +1,20 @@
-# --- Core app / UI ---
+# Deps for docker/monolith/app_live.py — the READ-ONLY local monitor (renders the latest stored prediction
+# + the gold cube). Torch-free by design: torch is off the live path (CLAUDE.md); the v1 U-Net deps
+# (torch/segmentation-models-pytorch/rasterio) were removed 2026-07-07 with the dead v1 compose config.
+
+# --- App / UI ---
 streamlit>=1.30
-requests
 pillow
 folium>=0.15
 
 # --- Numerical / array ---
 numpy>=1.24
 
-# --- ML / Torch ---
-torch>=2.1
-segmentation-models-pytorch>=0.3.3
-tqdm
-
-# --- Geospatial stack ---
-rasterio>=1.3.10
+# --- Geospatial ---
 pyproj>=3.6
 
-# --- Zarr / dataset ---
+# --- Cube access (xarray + zarr v2 stores) ---
 zarr>=2.16
 xarray>=2023.1
 numcodecs
-
-# --- Optional but commonly used in dataset code ---
-scipy
+pandas>=2.0

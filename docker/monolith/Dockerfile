@@ -1,47 +1,29 @@
 FROM python:3.11-slim
 
-# Basic OS deps (folium uses leaflet in HTML; pillow for PNG; numpy/scipy for ML)
+# Native deps for the geo stack (pyproj needs PROJ; folium/pillow are pure-python)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    gcc \
-    g++ \
-    gdal-bin \
-    libgdal-dev \
     proj-bin \
     proj-data \
     libproj-dev \
-    libgeos-dev \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Keep python logs unbuffered
 ENV PYTHONUNBUFFERED=1
 
-# Create a non-root user for improved security
-RUN groupadd -r appuser && useradd -r -g appuser appuser
-
 WORKDIR /workspace
-
-# Ensure the workspace directory is owned by the non-root user
-RUN chown appuser:appuser /workspace
 
 # Copy monolith requirements (for reproducible builds)
 COPY docker/monolith/requirements.txt /tmp/requirements.txt
 
 # Install runtime dependencies (prefer wheels)
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel
-
-# Install python deps for the monolith app
-RUN pip install --no-cache-dir --prefer-binary -r /tmp/requirements.txt
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir --prefer-binary -r /tmp/requirements.txt
 
 # Fail fast if native wheels/libs are missing
-RUN python -c "import rasterio; import pyproj; print('rasterio', rasterio.__version__, 'pyproj', pyproj.__version__)"
+RUN python -c "import pyproj, xarray, zarr; print('pyproj', pyproj.__version__)"
 
-# Create non-root user for running the application
-RUN addgroup --system app && adduser --system --ingroup app app
-
-# Set ownership of workspace directory
-RUN chown -R app:app /workspace
-
-# Switch to non-root user
+# Non-root user for running the application
+RUN addgroup --system app && adduser --system --ingroup app app \
+    && chown -R app:app /workspace
 USER app

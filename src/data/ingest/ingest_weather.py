@@ -44,18 +44,9 @@ FETCH_STEP = 0.25  # ERA5 native ~0.25°; fetch grid then regrid to 1 km
 WLON, WLAT = "__lon__", "__lat__"
 
 
-def atomic_savez(path, **arrays):
-    """Write a compressed npz atomically: to a temp file, then os.replace → rename. A crash (e.g. ENOSPC)
-    leaves only the temp file, never a truncated 'present' partition that skip-existing would treat as done.
-    The temp name ends in .npz so np.savez_compressed doesn't silently append its own .npz suffix."""
-    path = Path(path)
-    tmp = path.with_name(path.stem + ".tmp.npz")
-    try:
-        np.savez_compressed(tmp, **arrays)
-        os.replace(tmp, path)
-    finally:
-        if tmp.exists():
-            tmp.unlink()
+# Canonical atomic bronze write now lives in grid.py (shared by weather/fire/veg/static); alias kept
+# so existing call sites/imports keep working.
+atomic_savez = grid.atomic_savez
 
 
 def _stats(arr2d):

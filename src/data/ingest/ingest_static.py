@@ -113,7 +113,7 @@ def build_epochs(prod):
             out[y] = np.load(cache)["a"]
         else:
             out[y] = reproject_epoch(PRODUCTS[prod], y)
-            np.savez_compressed(cache, a=out[y])
+            grid.atomic_savez(cache, a=out[y])
         log.info(f"  {prod} {y}: mean={np.nanmean(out[y]):.2f} max={np.nanmax(out[y]):.1f}")
     return out
 

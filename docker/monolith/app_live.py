@@ -3,9 +3,14 @@
 The main application: a live forest-fire control center for Spain. Not a date-picker demo — it shows the
 LATEST prediction the engine produced and is built to feel operational.
 
-Architecture: the engine is `scripts/daily_job.py --mode live` (fetch Open-Meteo + FIRMS → assemble slice →
+Architecture: the engine is `scripts/serve.py --mode live` (fetch Open-Meteo + FIRMS → assemble slice →
 GBT → write date-partitioned store under data/serving_store/). THIS app READS the latest stored prediction
 (fast, no in-app rate-limited fetch) and renders it. Liveness is handled by st.fragment:
+
+⚠️ DRIFT NOTE (audit 2026-07-07): this local monitor has fallen behind the HF Space (space/app.py) — it
+still uses FIXED risk tiers (0.50/0.20/0.05) that calibrated probabilities almost never reach (the Space
+moved to prevalence-anchored tiers) and 4 km display constants. Open decision: port the Space's display
+logic here, or retire this app and run the Space locally (FIREGUARD_LOCAL_STORE=1).
   • a 1s fragment redraws the clock + per-feed "age" counters WITHOUT re-rendering the heavy map;
   • a 10s fragment watches the store and triggers a full rerun only when a NEW prediction lands
     (so no manual page reload — and no repeated st_folium re-render, which was crashing the process).
@@ -230,7 +235,7 @@ importance = load_importance()
 S = latest_store()
 if not S:
     st.markdown("## 🛡️ Fire Guard")
-    st.warning("No prediction in the store yet. Run:  `python scripts/daily_job.py --mode live`  to populate it.")
+    st.warning("No prediction in the store yet. Run:  `python scripts/serve.py --mode live`  to populate it.")
     st.stop()
 st.session_state["seen_mtime"] = S["mtime"]   # baseline for the store-watcher fragment
 
@@ -406,7 +411,7 @@ with st.expander("⚙️ Run engine now (on-demand live fetch)"):
                "Use this only to force a fresh fetch (Open-Meteo + FIRMS → GBT, ~30–60s).")
     if st.button("↻ Run live engine"):
         with st.spinner("Running live engine…"):
-            r = subprocess.run([sys.executable, str(ROOT / "scripts" / "daily_job.py"), "--mode", "live", "--overwrite"],
+            r = subprocess.run([sys.executable, str(ROOT / "scripts" / "serve.py"), "--mode", "live", "--overwrite"],
                                capture_output=True, text=True, cwd=str(ROOT))
             st.caption((r.stdout + r.stderr).strip().splitlines()[-1] if (r.stdout or r.stderr) else "done")
         st.cache_data.clear(); st.cache_resource.clear(); st.rerun()

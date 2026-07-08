@@ -69,3 +69,6 @@ data/serving_store/
 .cdsapirc
 data/cache/
 data/bronze/fireguard/ghsl/
+
+# Local session audit notes (agent output, not for the repo)
+audit.md

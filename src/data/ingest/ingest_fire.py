@@ -65,7 +65,7 @@ def write_day(date, src=SRC_NRT, df_day=None):
         df = _filter_conf(FB.fetch_firms(key, date, src=src, bbox=BBOX_LL, days=1))
         df_day = df[df["acq_date"] == date] if "acq_date" in df.columns else df
     fire = rasterize_day(df_day)
-    np.savez_compressed(BRONZE / f"{date}.npz", is_fire=fire, n_det=np.int32(0 if df_day is None else len(df_day)))
+    grid.atomic_savez(BRONZE / f"{date}.npz", is_fire=fire, n_det=np.int32(0 if df_day is None else len(df_day)))
     return fire, (0 if df_day is None else len(df_day))
 
 

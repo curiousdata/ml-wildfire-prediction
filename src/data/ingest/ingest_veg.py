@@ -181,7 +181,7 @@ def write_range(start, end, chunk_days=92):
             if (BRONZE / f"{ds}.npz").exists():
                 continue
             out = {feat: daily_interp(dts, stk, ds).astype(np.float32) for feat, (dts, stk) in res.items()}
-            np.savez_compressed(BRONZE / f"{ds}.npz", **out)
+            grid.atomic_savez(BRONZE / f"{ds}.npz", **out)
         log.info(f"{d}..{cend}: wrote {len(days)} days ({len(res)} veg features)")
         d = cend + _dt.timedelta(days=1)
 

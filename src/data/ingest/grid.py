@@ -61,6 +61,23 @@ def meshgrid():
     return np.meshgrid(x_coords(), y_coords())
 
 
+def atomic_savez(path, **arrays):
+    """Write a compressed npz atomically: to a temp file, then os.replace → rename. A crash (e.g. ENOSPC)
+    leaves only the temp file, never a truncated 'present' file that the ingesters' skip-existing
+    resumability would treat as done. Shared by ALL bronze writers (weather/fire/veg/static — the
+    2026-06-14 ENOSPC lesson originally fixed only weather). The temp name ends in .npz so
+    np.savez_compressed doesn't silently append its own suffix."""
+    import os
+    path = Path(path)
+    tmp = path.with_name(path.stem + ".tmp.npz")
+    try:
+        np.savez_compressed(tmp, **arrays)
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
 def refine_to_1km(coarse_2d: np.ndarray, factor: int = COARSEN_FACTOR) -> np.ndarray:
     """Nearest-neighbour refine a v1 4 km field [230,297] to the 1 km grid [920,1188] (each coarse cell
     → factor×factor block). Used to seed provisional masks from v1."""

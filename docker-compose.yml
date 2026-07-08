@@ -1,3 +1,8 @@
+# Local build of the Fire Guard monitor (docker/monolith/app_live.py) — reads the latest prediction from
+# data/serving_store/ and the FGDC gold cube, both reached through the read-only repo mount. The engine
+# (scripts/serve.py --mode live) runs on the host, not in this container.
+# (Rewritten 2026-07-07: the previous compose launched the deleted v1 U-Net app.py against the deleted
+# IberFire_coarse32 cube / resnet34_v9.pth — dead config since the 2026-06 v1 removal.)
 services:
   monolith:
     build:
@@ -7,39 +12,16 @@ services:
       - "8501:8501"
     restart: unless-stopped
     environment:
-      # Dataset/model paths inside container
-      - IBERFIRE_ZARR_PATH=/app/data/gold/IberFire_coarse32.zarr
-      - NORM_STATS_PATH=/app/stats/simple_iberfire_stats_train.json
-      - MODEL_PATH=/app/models
-      - MODEL_FILE=resnet34_v9.pth
-      - SOURCE_EPSG=3035
-
-      # Must match training behavior
-      - LABEL_VAR=is_fire
-      - LEAD_TIME=1
-      - TIME_START=2008-01-01
-      - TIME_END=2024-12-31
-
-      # Device selection
-      - TORCH_DEVICE=cpu
-
       # Streamlit stability in containers
       - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
       - STREAMLIT_SERVER_HEADLESS=true
       - HOME=/tmp
       - XDG_CONFIG_HOME=/tmp
       - XDG_CACHE_HOME=/tmp
-
-      # Make your repo code importable (for src.data.datasets)
+      # Make repo code importable (app_live inserts the repo root itself; kept for safety)
       - PYTHONPATH=/workspace
-
     volumes:
-      # Mount your repo for dataset code access (read-only)
+      # One read-only repo mount: app_live resolves data/serving_store + data/gold/FireGuard_coarse4.zarr
+      # relative to its own path (/workspace)
       - ./:/workspace:ro
-
-      # Mount data/model/stats explicitly (read-only)
-      - ./data:/app/data:ro
-      - ./models:/app/models:ro
-      - ./stats:/app/stats:ro
-
-    command: streamlit run /workspace/docker/monolith/app.py --server.port=8501 --server.address=0.0.0.0
+    command: streamlit run /workspace/docker/monolith/app_live.py --server.port=8501 --server.address=0.0.0.0
