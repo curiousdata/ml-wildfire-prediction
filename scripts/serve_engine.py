@@ -32,32 +32,39 @@ from src.data.ingest import ingest_fire as IF
 
 CUBE = grid.ROOT / "data" / "gold" / "FireGuard_coarse4.zarr"
 FETCH_STEP = 0.25                                    # native ~0.25°
+BAND_CACHE = grid.ROOT / "data" / "serving_store" / "band_cache"
+REFETCH_RECENT_DAYS = 2   # always re-fetch the newest N band days (Open-Meteo archive is IFS-provisional there and
+                          # FIRMS NRT keeps landing detections); older band days are settled → served from the
+                          # on-disk cache. Bounds each serve's fetch to ~(new days since last run)+N instead of the
+                          # whole (widening-all-week) band. NB: clear band_cache/ if HOURLY_VARS/weather vars change.
 
 
-def _band_raw(z, band, gx, gy):
-    """Raw dynamic fields for the edge band → {var: (n_band, NY, NX)}. Weather from the Open-Meteo **ARCHIVE**
-    (free endpoint, seamless to ~today — the recent ~5 d are IFS-model-filled), fire=FIRMS NRT (both fetched as a
-    SINGLE range request — not per-day — to stay under rate limits), everything else (veg, GHS, and engineered
-    placeholders) CARRIED from the cube's last row (the engine overwrites the engineered; veg/GHS are slow-varying
-    so carry-forward is the right estimate for a ≤~5 d edge). Archive (not forecast) because the model predicts
-    t+1 from TODAY's features — today's weather is in the archive — so serve needs NO commercial forecast key, and
-    it matches the product family the batch later settles (better train/serve consistency)."""
+def _fetch_days(band_days, gx, gy, gold_time):
+    """Fetch + grid the raw FETCHED fields (weather + is_fire) for a contiguous set of days → {Timestamp: {var: grid}}.
+    Weather from the Open-Meteo **ARCHIVE** (free endpoint, seamless to ~today — the recent ~5 d are IFS-model-filled),
+    fire=FIRMS NRT, both as a SINGLE range request (not per-day) to stay under rate limits. Archive (not forecast)
+    because the model predicts t+1 from TODAY's features — today's weather is in the archive — so serve needs NO
+    commercial forecast key, matching the product family the batch later settles (train/serve consistency)."""
     import os
     from src.data import fetch as FB
-    gold_time = [v for v in z.data_vars if "time" in z[v].dims]
-    last = {v: z[v].isel(time=-1).values for v in gold_time}
-    start, end = band[0].date().isoformat(), band[-1].date().isoformat()
-    # ONE archive-weather range fetch + ONE precip range fetch (whole band; seamless-to-today, free endpoint)
-    plon, plat, hv, times = OM.fetch_grid_hourly_range(start, end, IW.HOURLY_VARS, step=FETCH_STEP, source="archive")
-    _, _, dly, _ = OM.fetch_grid_range(start, end, ["precipitation_sum"], step=FETCH_STEP, source="archive")
+    fstart, fend = band_days[0].date().isoformat(), band_days[-1].date().isoformat()
+    frange = pd.date_range(band_days[0], band_days[-1])
+    plon, plat, hv, times = OM.fetch_grid_hourly_range(fstart, fend, IW.HOURLY_VARS, step=FETCH_STEP, source="archive")
+    _, _, dly, _ = OM.fetch_grid_range(fstart, fend, ["precipitation_sum"], step=FETCH_STEP, source="archive")
     rg = OM.make_regridder(np.asarray(plon, float), np.asarray(plat, float), gx, gy)
-    precip = dly["precipitation_sum"]                                # (n_band, n_pts)
+    precip = dly["precipitation_sum"]                                # (n_range, n_pts)
     # FIRMS NRT in ≤5-day windows (the area API caps day_range at 5), concat, split per acq_date. THREE VIIRS birds —
     # S-NPP + NOAA-20 + NOAA-21 (all 6 daily passes) → union at the grid (fires_to_grid: any detection in a cell = fire).
     key = os.getenv("FIRMS_MAP_KEY")
+    if not key:
+        # HARD-FAIL: without fire, is_fire silently becomes all-zeros → dist_to_fire = grid diagonal, the
+        # spread regime empties, and an off-distribution prediction gets published stamped LIVE. A crashed
+        # serve is safe (previous prediction stays live, run_serve.sh keeps the heartbeat stale); a silently
+        # fire-blind one is not. (Audit 2026-07-07.)
+        raise RuntimeError("FIRMS_MAP_KEY not set — refusing a fire-blind live serve (is_fire would be all zeros)")
     fdf = None
     if key:
-        bd = [d.date() for d in band]
+        bd = [d.date() for d in frange]
         parts, i = [], 0
         while i < len(bd):
             w = min(5, len(bd) - i)
@@ -65,16 +72,63 @@ def _band_raw(z, band, gx, gy):
                 parts.append(IF._filter_conf(FB.fetch_firms(key, bd[i].isoformat(), src=src, bbox=IF.BBOX_LL, days=w)))
             i += w
         fdf = pd.concat([p for p in parts if p is not None and not p.empty], ignore_index=True) if parts else None
-
-    raw = {v: np.empty((len(band), len(gy), len(gx)), np.float32) for v in gold_time}
-    for k, d in enumerate(band):
+    out = {}
+    for k, d in enumerate(frange):
         ds = d.date().isoformat()
         wday = {f: rg(vec) for f, vec in IW.daily_point_features(hv, times, precip[k], ds).items()}
         fd = fdf[fdf["acq_date"] == ds] if (fdf is not None and "acq_date" in fdf.columns) else None
         fire = (FB.fires_to_grid(fd["longitude"].values, fd["latitude"].values, gx, gy)
                 if (fd is not None and not fd.empty) else np.zeros((len(gy), len(gx)), np.float32))
+        out[d] = {**wday, "is_fire": fire.astype(np.float32)}       # only the fetched vars (carried applied at assembly)
+    return out
+
+
+def _band_raw(z, band, gx, gy):
+    """Raw dynamic fields for the edge band → {var: (n_band, NY, NX)}, with a per-day on-disk cache (see BAND_CACHE /
+    REFETCH_RECENT_DAYS): SETTLED band days (older than the refetch window) are served from cache; only missing +
+    the newest REFETCH_RECENT_DAYS days are actually fetched, so each serve's Open-Meteo cost stays ~2–3 days
+    instead of the whole widening band. Fetched vars = weather + is_fire; everything else (veg, GHS, engineered
+    placeholders) is CARRIED from the cube's last row (slow-varying; the engine overwrites engineered anyway)."""
+    gold_time = [v for v in z.data_vars if "time" in z[v].dims]
+    last = {v: z[v].isel(time=-1).values for v in gold_time}         # carried feeds (from the current cube tail)
+    NY, NX = len(gy), len(gx)
+    cdir = BAND_CACHE / f"{NY}x{NX}"
+    cdir.mkdir(parents=True, exist_ok=True)
+    today = pd.Timestamp.utcnow().tz_localize(None).normalize()      # tz-naive to compare with the cube's naive band days
+
+    def _cpath(d):
+        return cdir / f"{pd.Timestamp(d).date().isoformat()}.npz"
+
+    def _settled_cached(d):                                          # cached AND old enough to be final (not refetched)
+        return _cpath(d).exists() and pd.Timestamp(d) < today - pd.Timedelta(days=REFETCH_RECENT_DAYS)
+
+    day_fields = {}                                                 # {Timestamp: {fetched_var: grid}}
+    for d in band:                                                  # settled days: load from cache (no network)
+        if _settled_cached(d):
+            with np.load(_cpath(d)) as npz:
+                day_fields[d] = {v: npz[v] for v in npz.files}
+    fetch_days = [d for d in band if d not in day_fields]           # missing OR within the provisional refetch window
+    if fetch_days:                                                  # fetch the contiguous recent tail, cache each day
+        import logging
+        log = logging.getLogger("serve")
+        fetched = _fetch_days(fetch_days, gx, gy, gold_time)
+        for d, fields in fetched.items():
+            day_fields[d] = fields
+            if float(fields["is_fire"].sum()) == 0.0:
+                # PLAUSIBILITY GUARD: zero VIIRS detections across the whole Iberia bbox in a day is
+                # essentially impossible (even winter has ag burns) — far more likely a FIRMS outage or an
+                # empty/expired response. Serve degrades gracefully (this run still uses the zeros) but the
+                # day is NOT cached, so it is re-fetched next run instead of poisoning the settled cache.
+                log.warning(f"zero fire detections for {pd.Timestamp(d).date()} across all Iberia — "
+                            f"suspicious (FIRMS outage?); day NOT cached, will refetch next serve")
+                continue
+            np.savez(_cpath(d), **fields)                            # persist for the next serve
+
+    raw = {v: np.empty((len(band), NY, NX), np.float32) for v in gold_time}
+    for k, d in enumerate(band):
+        ff = day_fields.get(d, {})
         for v in gold_time:
-            raw[v][k] = wday[v] if v in wday else (fire if v == "is_fire" else last[v])
+            raw[v][k] = ff[v] if v in ff else last[v]                # fetched (weather/is_fire) else carried
     return raw
 
 
