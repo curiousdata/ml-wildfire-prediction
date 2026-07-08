@@ -44,6 +44,17 @@ def main():
     # output model so an ablation run never clobbers the production gbt_fireguard.joblib slot.
     drop = set(sys.argv[sys.argv.index("--drop") + 1].split(",")) if "--drop" in sys.argv else set()
     tag = sys.argv[sys.argv.index("--tag") + 1] if "--tag" in sys.argv else ""
+    # --factor F: train on data/gold/FireGuard_coarse{F}.zarr (F=4 → the block-rechunked _t200). Resolution
+    # migration (finer-resolution branch): REGIME_KM is in km so it's resolution-independent; feature ORDER unchanged.
+    factor = int(sys.argv[sys.argv.index("--factor") + 1]) if "--factor" in sys.argv else 4
+    if factor != 4 and not tag:
+        # tag GUARD: a non-production factor must never write the default gbt_fireguard.* slot (the live
+        # deploy — see the 2026-07-06 serve-artifact-tagging incident). Mirror serve.py's auto-derived tag.
+        tag = f"{factor}km"
+        log.info(f"--factor {factor} without --tag → auto-tagging '{tag}' (production slot protected)")
+    cube_path = CUBE if factor == 4 else T.project_root / "data" / "gold" / f"FireGuard_coarse{factor}.zarr"
+    BLK = max(12, int(200 * (factor / 4) ** 2))   # area-scale the time-block load so RAM/block ~constant
+                                                  # (4km→200, 2km→50, 1km→12; floor 12 keeps the invariant at 1km)
     lead = int(sys.argv[sys.argv.index("--weather-lead") + 1]) if "--weather-lead" in sys.argv else 0
     # --complement: ADD the weather vars at t+lead as EXTRA columns (keeping them at t too) — the deployment-
     # honest "does tomorrow's forecast help ON TOP OF today's weather?" ceiling. Without it, --weather-lead
@@ -52,7 +63,8 @@ def main():
     horizon = 1
     rng = np.random.default_rng(0)
 
-    datacube = xr.open_zarr(str(CUBE), consolidated=True)
+    datacube = xr.open_zarr(str(cube_path), consolidated=True)
+    log.info(f"cube: {cube_path.name} (factor {factor})")
     feats = [f for f in FGDC_FEATURE_VARS if f in datacube and f not in drop]
     miss = [f for f in FGDC_FEATURE_VARS if f not in datacube]
     if miss:
@@ -98,9 +110,9 @@ def main():
     # --- TRAIN (first 80% of days; subsample negatives to NEG_RATIO:1) ---
     Xtr, ytr = [], []
     build_start = time.time()
-    for t0 in range(0, cut, 200):
-        block = datacube[dynamic_features].isel(time=slice(t0, t0+200+lead)).load()
-        for local_t, t in enumerate(range(t0, min(t0 + 200, cut))):
+    for t0 in range(0, cut, BLK):
+        block = datacube[dynamic_features].isel(time=slice(t0, t0+BLK+lead)).load()
+        for local_t, t in enumerate(range(t0, min(t0 + BLK, cut))):
 
             # Build the feature matrix and label vector for the current day t, subsampling negatives 
             feat = build_feat(block, local_t, lead=lead, complement=complement)
@@ -127,9 +139,9 @@ def main():
     # --- VAL (last 20% of days; per-day eval, full prevalence accumulated) ---
     probs, ys, regs = [], [], []
     val_start = time.time()
-    for t0 in range(cut, tmax + 1, 200):
-        block = datacube[dynamic_features].isel(time=slice(t0, t0+200+lead)).load()
-        for local_t, t in enumerate(range(t0, min(t0 + 200, tmax + 1))):
+    for t0 in range(cut, tmax + 1, BLK):
+        block = datacube[dynamic_features].isel(time=slice(t0, t0+BLK+lead)).load()
+        for local_t, t in enumerate(range(t0, min(t0 + BLK, tmax + 1))):
             feat = build_feat(block, local_t, lead=lead, complement=complement)
             yt = label(t)
             probt = gbt.predict_proba(feat)[:, 1]
@@ -146,7 +158,7 @@ def main():
     out = T.project_root / "models" / (f"gbt_fireguard_{tag}.joblib" if tag else "gbt_fireguard.joblib")
     out.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump({"model": gbt, "features": out_features}, out)
-    meta = {"model": "HistGradientBoostingClassifier (FGDC v2, point-wise)", "cube": str(CUBE),
+    meta = {"model": "HistGradientBoostingClassifier (FGDC v2, point-wise)", "cube": str(cube_path), "factor": factor,
             "n_features": len(out_features), "features": out_features, "horizon": horizon, "regime_km": REGIME_KM,
             "params": params, "n_iter": int(gbt.n_iter_), "val": m,
             "split": f"chrono 80/20 of {tmax + 1} days (train ≤ {cut})",

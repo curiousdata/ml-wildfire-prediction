@@ -10,6 +10,156 @@ current dated entry — what was wrong, its impact, and the fix (or that it's fl
 
 ---
 
+## 2026-07-08 — 2 km migration infrastructure: KBDI fix + fp16 feature build + resolution-flexible tooling + serve band-cache
+
+Building the full-history (2012–2026), 3-satellite (S-NPP + NOAA-20 + NOAA-21) **2 km** cube on a 16 GB box forced
+a real memory pass, and folding in the audit's KBDI fix made this the natural moment to re-materialize the drought
+index and rebuild the model. Groundwork committed here; the display re-anchor + model promotion follow once the
+KBDI-fixed retrain lands.
+
+- **Memory-safe feature build (fits full-history 2 km in 16 GB).** The whole-cube `build_features` peaked ~16 GB
+  from float64 whole-cube arrays. Fixed by keeping inputs at their fp16 storage dtype and upcasting only per-day
+  **slices** inside the recursive kernels (KBDI, `days_since_rain`), float32 (not float64) cumsums, and fp16
+  outputs (free for HistGBT's 255-bin) — peak **8.8 GB**. Per-grid recursive accumulators stay float64.
+- **Tight cube dtypes.** 2 km gold cast to fp16 continuous / uint8 binary (`is_fire`, `AutonomousCommunities`) /
+  f32 overflow (`built_s`) → 35 GB, and `is_fire` is now the uint8 it always should have been.
+- **Resolution-flexible tooling.** `train_gbt`/`calibrate`/`serve`/`multisat_fire_fetch` take `--factor` (cube +
+  area-scaled block reads + tagged artifacts + isolated `serving_store_{F}km`); `calibrate --since` fits the
+  isotonic on a label ERA (6-pass 2024-04+) for train=serve prevalence. New `resolution_ablation.py` (localization
+  at fixed km) → 2 km adopted: ignition **hit@8 km 0.35→0.48**, spread + localization win, AP tie = operational win.
+- **Serve band-cache.** `serve_engine` re-fetched the whole (widening-all-week) forecast band each run → tripped
+  Open-Meteo's hourly limit. Now caches per-day gridded fields and only fetches the newest 2 days + misses →
+  fetch is **constant ~3 days**, not the whole band. Offline-verified 9d→3d.
+- **v2 importance tool** (`scripts/gbt_importance.py`) — per-regime permutation-importance, factor-aware; now an
+  analysis artifact (the Space uses live per-cell drivers).
+
+### Bugs found & fixed
+
+- **🔴 KBDI precipitation scale ~8× too small (from the 2026-07-07 audit).** `TP_TO_DAILY_MM = 2.9` was a stale v1
+  constant; the FGDC ingester writes `total_precipitation_mean = daily_sum/24`, so the factor must be **24**.
+  Verified on the 2 km cube: land-mean rainfall ×2.9 = 81 mm/yr (implausible) vs ×24 = **674 mm/yr** (AEMET ~640).
+  Fixed the constant in both copies (`build_features.py` + `update_edge.py`, the "must match" pair) and
+  re-materialized `kbdi` on the 2 km cube — now a healthy drought index (mean 43.8, full spread, **0 % pinned at
+  the 203.2 ceiling**, vs the old compressed/near-ceiling distribution that scored kbdi-alone ROC 0.481). The
+  retrain on the corrected cube is in flight.
+- **`seasonal_anomaly` fp16 overflow → `inf`.** `eps=1e-6` is far below NDVI's 0–1 scale, so near-constant cells
+  produced z-scores to ~48 000 → `inf` when stored fp16. Added a ±10σ clip (both branches; NaN-preserving) — a
+  degenerate-cell numerical artifact, not signal. Recomputed spi/ndvi/lai anomalies: `inf=0`.
+
+## 2026-07-08 — audit proceed pass: robustness quick-wins applied (KBDI deliberately deferred)
+
+Applied the safe, no-retrain items from yesterday's audit. Everything compile+import verified; the shared
+atomic write round-tripped; `serve.py --show` green. The live loop is untouched behaviourally except where a
+failure would previously have been silent.
+
+### Bugs fixed (from the 2026-07-07 audit list)
+- **Tag guard (the 2026-07-06 incident class), FIXED:** `train_gbt.py` and `calibrate.py` now auto-derive
+  `--tag {F}km` when `--factor ≠ 4` is given untagged (mirroring `serve.py`) — an untagged experiment can no
+  longer overwrite the production `gbt_fireguard.*` model/calibrator slot.
+- **Silent zero-fire at serve, FIXED:** `serve_engine._fetch_days` now HARD-FAILS when `FIRMS_MAP_KEY` is
+  missing (a crashed serve is safe — the previous prediction stays live; a fire-blind one is not), and
+  `_band_raw` no longer caches a band day with zero detections across all Iberia (implausible → likely FIRMS
+  outage): it serves that run degraded but re-fetches next run instead of poisoning the settled band cache.
+- **Non-atomic bronze writes, FIXED:** canonical `atomic_savez` moved to `grid.py` (temp + `os.replace`);
+  fire/veg/static bronze writers now use it (weather keeps its alias). A crash mid-write can no longer leave
+  a truncated npz that skip-existing resumability treats as done.
+- **`BLK` floor at fine factors, FIXED:** `max(25, …)` → `max(12, …)` in `train_gbt.py`/`calibrate.py` so the
+  area-scaled block-load actually holds its RAM invariant at factor 1.
+- **Dead v1 docker config, FIXED:** `docker-compose.yml` rewritten to run `docker/monolith/app_live.py`
+  (the old compose launched the deleted v1 `app.py` against the deleted `IberFire_coarse32` cube +
+  `resnet34_v9.pth`); monolith `Dockerfile`/`requirements.txt` slimmed torch-free (torch/smp/rasterio out,
+  duplicate non-root user removed). README's `docker-compose up` instruction is true again.
+- **Stale v1 driver fallback in the Space, FIXED:** removed `space/gbt_coarse4.importance.json` (v1 model's
+  importances) + its dead fallback path in `space/app.py` — drivers are always present in served grids.
+- **Doc rot, FIXED:** CLAUDE.md conventions block updated to FGDC reality (135-var `FGDC_FEATURE_VARS`,
+  `gbt_fireguard.*` slot + tag rule, archived U-Net/Dataset paths, actual serve path); `app_live.py` stale
+  `daily_job.py` references fixed — including a FUNCTIONAL one: the "↻ Run live engine" button subprocessed
+  the renamed `scripts/daily_job.py` (would fail at runtime since the 2026-07-03 rename) → now `serve.py`;
+  plus an explicit DRIFT NOTE added (fixed tiers vs the Space's prevalence-anchored ones — port-or-retire is
+  an open decision). Final sweep found no other dangling renamed-script references outside history comments.
+  NB `space/README.md` still says "4 km" — correct for the LIVE Space; it joins the 2 km cutover bundle.
+
+### KBDI (the 🔴 audit finding) — deliberately NOT flipped in this pass
+The constant flip is **coupled**: `update_edge`/`serve_engine` compute edge kbdi with the same
+`TP_TO_DAILY_MM` the cube+model were built with, so changing 2.9→24 in code alone would shift the live
+model's kbdi input ~8× on the very next serve — degrading the live map while "fixing" the units. The only
+safe sequence is atomic: **flip constant (both copies) → re-materialize kbdi on the target cube → retrain →
+recalibrate → cut over serve to those artifacts in the same deploy.** Recipe: fold into the `resolution-2km`
+cutover retrain (flip constants in the cutover commit; rebuild kbdi on the 2 km cube; retrain/recalibrate
+`gbt_fireguard_2km`; the 4 km path retires at the same moment). Until then 2.9 stays, consistently wrong at
+train and serve (bounded skill impact, as audited).
+
+## 2026-07-07 — full-pipeline audit (idea → ingestion → cube → model → serve → Space)
+
+End-to-end review of the production path for correctness / efficiency / robustness / methodological
+soundness (report in the session; summary here). Verdict: architecture and method are sound; the pivots left
+few real inefficiencies — but the audit found one confirmed feature-scale bug and three robustness gaps.
+
+### Bugs found & fixed
+- **KBDI precipitation scale is wrong ~8× (FLAGGED, not fixed).** `build_features.TP_TO_DAILY_MM = 2.9` (and its
+  duplicate in `update_edge.py`) is the stale **v1** calibration ("cumulative-mean → daily-total"). The FGDC
+  ingester writes `total_precipitation_mean = daily_sum / 24` (`ingest_weather.daily_point_features`), so the
+  correct factor is **24** — exactly what `feature_engineering.keetch_byram_drought_index`'s docstring says.
+  Verified on the gold cube: land-mean annual rain R = **81.5 mm/yr with 2.9** vs **674 mm/yr with 24** (AEMET
+  ~640). Impact: KBDI's rain input ~8.3× too small AND R ~8.3× too small (drying denom 10.5 vs 4.4 → drying
+  ~2.4× too slow); the feature is a distorted drought index (compressed dynamic range, "mm" attr wrong), though
+  train=serve consistent so the model learned around it. Fix = change the constant (both copies), re-materialize
+  kbdi, retrain — natural to fold into the in-flight 2 km retrain.
+- **Untagged `--factor` in train/calibrate can clobber production artifacts (FLAGGED).** `serve.py --factor`
+  auto-derives the `{F}km` tag, but `train_gbt.py --factor 2` without `--tag` still writes
+  `models/gbt_fireguard.joblib`, and `calibrate.py --factor 2` without `--tag` loads the **4 km** model, evals it
+  on the 2 km cube, and overwrites the production calibrator — the exact 2026-07-06 incident class. Fix: factor≠4
+  ⇒ default tag `{F}km` (or refuse untagged).
+- **Silent zero-fire at serve + band-cache poisoning (FLAGGED).** `serve_engine._fetch_days`: missing
+  `FIRMS_MAP_KEY` (or an all-empty fetch) yields `is_fire = zeros` with no warning; `_band_raw` caches it, and
+  once the day ages past `REFETCH_RECENT_DAYS` the zero-fire day is served from cache forever. The Space's
+  time-derived LIVE pill would still show LIVE. Fix: hard-fail live serve when the key is absent + a plausibility
+  guard (0 detections across Iberia in a band day → degrade loudly, don't cache).
+- **Non-atomic bronze writes for fire/veg/static (FLAGGED).** Only weather got `atomic_savez` after the ENOSPC
+  lesson; `ingest_fire`/`ingest_veg`/`ingest_static` still `np.savez_compressed` directly — a crash mid-write
+  leaves a truncated npz that skip-existing resumability treats as done. Fix: share `atomic_savez`.
+
+Also recorded (debt, not bugs): weekly-path fire days ingested as NRT are never upgraded to SP once settled
+(accepted while the true batch tier is unbuilt); v2 has no touched-once test set (the chrono-20% val is reused
+for ablations + calibration fit — carve a final untouched window before any paper claim); the deployed model is
+trained on the first 80% only (refit-on-all still open, ROADMAP item 3).
+
+**Exploration addendum (previously-unaudited areas — FLAGGED, not fixed):**
+- **`docker-compose.yml` is dead v1 config:** it runs `docker/monolith/app.py` (deleted; only `app_live.py`
+  remains) against `IberFire_coarse32.zarr` + `resnet34_v9.pth` + `stats/` (all deleted 2026-06→07) — and
+  README advertises `docker-compose up --build` as the local run path. Repoint to `app_live.py` (drop the v1
+  env) or delete compose and update README.
+- **`docker/monolith/app_live.py` drifted behind the Space:** stale `daily_job.py` reference, the old FIXED
+  risk tiers 0.50/0.20/0.05 (the Space replaced them with prevalence-anchored tiers precisely because they
+  "almost never triggered"), 4 km `CELL_KM2`. Decide: port the Space's display logic, or archive the monolith.
+- **`space/gbt_coarse4.importance.json`** — the Space's driver-fallback is the *v1 model's* importance file
+  (stale name AND content); regenerate from `gbt_fireguard` or drop the fallback.
+- **CLAUDE.md staleness:** references `src/models/cnn.py` (`build_unet`) and `src/data/datasets.py`
+  (`BaseIberFireDataset`) as live paths — both now exist only under `archive/`.
+- **`logs/night_worklog.md` is DELIBERATELY gitignored** (alongside CLAUDE.md/ROADMAP.md — local planning docs),
+  not forgotten — but it is the primary source of the 2026-06-07 GBT-pivot night (v5/v6 vs GBT table, dig +
+  spatial verdicts, the MPS compile finding) and exists in one copy; include it in the backup set (below), and
+  consider a public archive/ copy when the story is published.
+- **Single-copy data risk:** bronze (`data/bronze/`, ~40 GB incl. the 39 GB veg feed) + silver (151 GB) are
+  git-ignored and exist ONLY on this laptop; "bronze is the source of truth" currently has zero redundancy.
+  Worse, `data/cache/multisat/` (4 GB, git-ignored) holds the ONLY copy of NOAA-21/20 NRT fire history whose
+  FIRMS NRT window has already expired upstream — partially UNRE-FETCHABLE. Fold a backup (bronze + multisat
+  cache at minimum) into the planned SSD purchase.
+- Independent corroboration of the KBDI bug: `reports/baseline_panel.json` has kbdi-alone ROC **0.481 —
+  below random** (ffwi-alone 0.546); consistent with the ~8× rain-scale distortion found above.
+- `reports/gbt_optuna.json` (v1-era, 40 trials) — a forgotten prior for the pending v2 Optuna: tuned params
+  (lr 0.056, **209 leaves**, min_samples_leaf 254, max_features 0.69) beat the v1 baseline +0.006 test new-ign;
+  v2's hand-set 63 leaves sits far from that optimum → the pending tuning has an informed starting space.
+
+**Resolution-branch audit addendum (latent, blocks 1 km — FLAGGED):** (1) `train_gbt`/`calibrate`'s
+`BLK = max(25, int(200*(factor/4)**2))` floors at 25 for factor 1 (intended area-scaling gives 12.5) → the
+"constant RAM/block" invariant silently doubles at 1 km (`resolution_ablation.py`'s floor of 12 is correct).
+(2) `train_gbt`, `calibrate`, and `resolution_ablation` materialize `is_fire` (and the ablation also
+`dist_to_fire`) as WHOLE-CUBE `.values` — ~23 GB each at 1 km full-history → OOM before any block-load tuning
+matters; the 1 km path needs the streaming/reader refactor ([[data-pipeline-streaming]]) regardless of BLK.
+
+---
+
 ## 2026-07-04 (later) — third VIIRS bird at SERVE (NOAA-21) → 6 passes/day
 
 Extended the serve union to **NOAA-21** — a drop-in third VIIRS bird, same 375 m product/algorithm as S-NPP and

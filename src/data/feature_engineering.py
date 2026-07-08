@@ -111,8 +111,8 @@ def equilibrium_moisture_content(t_celsius, rh_pct):
     Piecewise in RH; temperature converted to °F internally. Pair with the daytime
     extreme (t2m_max, RH_min) for the most-flammable "peak" value, mirroring VPD_peak.
     """
-    rh = np.asarray(rh_pct, dtype="float64")
-    t_f = np.asarray(t_celsius, dtype="float64") * 9.0 / 5.0 + 32.0
+    rh = np.asarray(rh_pct, dtype="float32")
+    t_f = np.asarray(t_celsius, dtype="float32") * 9.0 / 5.0 + 32.0
     emc = np.where(
         rh < 10.0,
         0.03229 + 0.281073 * rh - 0.000578 * rh * t_f,
@@ -146,8 +146,12 @@ def keetch_byram_drought_index(daily_rain_mm, t_max_c, annual_rain_mm, q0=None):
     spell is intercepted (no effect); rain beyond that reduces the deficit. The
     drought factor is clamped >= 0 (drying cannot be negative on cold days).
     """
-    rain = np.asarray(daily_rain_mm, dtype="float64")
-    tmax = np.asarray(t_max_c, dtype="float64")
+    # memory-bound: keep whole-cube inputs at their (fp16) dtype and upcast only the per-day SLICE inside the
+    # loop (a few MB) — this is a per-grid time-recursion, so it never needs the inputs as full f32 arrays
+    # (peak ~8.7 not ~14.5 GB). Output float16 (KBDI clamped 0..203.2 → fp16 exact enough); the RECURSIVE
+    # per-grid accumulators Q/cum_wet stay float64 for drift-free accumulation.
+    rain = np.asarray(daily_rain_mm)
+    tmax = np.asarray(t_max_c)
     R = np.asarray(annual_rain_mm, dtype="float64")
     nt = rain.shape[0]
     Q = (np.zeros(rain.shape[1:], dtype="float64") if q0 is None
@@ -155,9 +159,9 @@ def keetch_byram_drought_index(daily_rain_mm, t_max_c, annual_rain_mm, q0=None):
     cum_wet = np.zeros_like(Q)
     denom = 1.0 + 10.88 * np.exp(-0.001736 * R)
     THRESH = 5.08
-    out = np.empty_like(rain)
+    out = np.empty(rain.shape, dtype="float16")
     for t in range(nt):
-        r = rain[t]
+        r = rain[t].astype("float32")   # per-day slice upcast (a few MB), not the whole cube
         wet = r > 0
         prev_excess = np.maximum(cum_wet - THRESH, 0.0)
         cum_wet = np.where(wet, cum_wet + r, 0.0)          # reset wet spell on dry days
@@ -165,7 +169,7 @@ def keetch_byram_drought_index(daily_rain_mm, t_max_c, annual_rain_mm, q0=None):
         # would otherwise make this difference negative and spuriously add deficit).
         net_rain = np.where(wet, np.maximum(cum_wet - THRESH, 0.0) - prev_excess, 0.0)
         Q = np.maximum(Q - net_rain, 0.0)
-        dq = (203.2 - Q) * (0.968 * np.exp(0.0875 * tmax[t] + 1.5552) - 8.30) / denom * 1e-3
+        dq = (203.2 - Q) * (0.968 * np.exp(0.0875 * tmax[t].astype("float32") + 1.5552) - 8.30) / denom * 1e-3
         Q = np.minimum(Q + np.maximum(dq, 0.0), 203.2)
         out[t] = Q
     return out
@@ -177,15 +181,15 @@ def fosberg_ffwi(emc_pct, wind_speed_ms):
     Fast-reacting fire-weather index (complements the slow FWI). Higher = more
     dangerous (dry fuel + strong wind). Unbounded-ish but typically 0–100.
     """
-    m = np.minimum(np.asarray(emc_pct, dtype="float64"), 30.0) / 30.0  # moisture damping, capped
+    m = np.minimum(np.asarray(emc_pct, dtype="float32"), 30.0) / 30.0  # moisture damping, capped
     eta = 1.0 - 2.0 * m + 1.5 * m ** 2 - 0.5 * m ** 3
-    u_mph = np.asarray(wind_speed_ms, dtype="float64") * 2.236936
+    u_mph = np.asarray(wind_speed_ms, dtype="float32") * 2.236936
     return eta * np.sqrt(1.0 + u_mph ** 2) / 0.3002
 
 
 def fractional_vegetation_cover(ndvi, ndvi_soil: float = 0.05, ndvi_veg: float = 0.86):
     """Fractional vegetation cover [0, 1] from NDVI (Carlson & Ripley 1997)."""
-    n = np.asarray(ndvi, dtype="float64")
+    n = np.asarray(ndvi, dtype="float32")
     fvc = ((n - ndvi_soil) / (ndvi_veg - ndvi_soil)) ** 2
     return np.clip(fvc, 0.0, 1.0)
 
@@ -268,7 +272,7 @@ def day_of_week_sincos(day_of_week, period: float = 7.0):
 # new-ignition vs. continuation split.
 
 
-def seasonal_anomaly(values, doy, eps: float = 1e-6, causal: bool = False):
+def seasonal_anomaly(values, doy, eps: float = 1e-6, causal: bool = False, clip: float = 10.0):
     """Standardized anomaly vs the day-of-year climatology (per pixel).
 
     For each calendar day-of-year d, z = (value − mean_d) / std_d. Captures "wetter/greener/drier than
@@ -288,7 +292,7 @@ def seasonal_anomaly(values, doy, eps: float = 1e-6, causal: bool = False):
     Returns:
         (time, y, x) float32 z-scores. NaNs propagate.
     """
-    values = np.asarray(values, dtype="float64")
+    values = np.asarray(values, dtype="float32")   # whole-cube → float32 (z-score precision fine); per-doy blocks small
     doy = np.asarray(doy)
     if not causal:
         out = np.empty_like(values, dtype="float32")
@@ -297,7 +301,9 @@ def seasonal_anomaly(values, doy, eps: float = 1e-6, causal: bool = False):
             block = values[sel]
             mean = np.nanmean(block, axis=0)
             std = np.nanstd(block, axis=0)
-            out[sel] = ((block - mean) / (std + eps)).astype("float32")
+            # clip degenerate z-scores: near-constant cells (std≈0) otherwise blow up past ±1e4 (fp16 → inf);
+            # |z|>clip σ is a numerical artifact, not seasonal signal. NaN is preserved by np.clip.
+            out[sel] = np.clip((block - mean) / (std + eps), -clip, clip).astype("float32")
         return out
     out = np.full(values.shape, np.nan, dtype="float32")          # causal: NaN where no prior year exists
     for d in np.unique(doy):
@@ -314,7 +320,7 @@ def seasonal_anomaly(values, doy, eps: float = 1e-6, causal: bool = False):
             with np.errstate(invalid="ignore", divide="ignore"):
                 mean = ssum[k - 1] / c
                 std = np.sqrt(np.maximum(ssq[k - 1] / c - mean ** 2, 0.0))
-                z = (block[k] - mean) / (std + eps)
+                z = np.clip((block[k] - mean) / (std + eps), -clip, clip)   # clip degenerate near-constant-cell blowups
             out[idx[k]] = np.where(c >= 2, z, np.nan).astype("float32")   # need ≥2 priors (1 → std=0 → blowup)
     return out
 
@@ -443,7 +449,7 @@ def rolling_sum_time(arr, window: int):
     """
     if window < 1:
         raise ValueError("window must be >= 1")
-    arr = np.asarray(arr, dtype="float64")
+    arr = np.asarray(arr, dtype="float32")   # counts (fire-days) — float32 is exact up to 2^24; whole-cube memory
     csum = np.cumsum(arr, axis=0)
     out = np.full_like(csum, np.nan)
     out[window - 1:] = csum[window - 1:]                 # t == window-1: sum of first `window`
@@ -469,9 +475,11 @@ def days_since_rain(precip, threshold: float):
         float64 array, same shape; value at t = number of consecutive dry days
         ending at (and including) t. 0 on a wet day.
     """
-    precip = np.asarray(precip, dtype="float64")
+    # memory-bound: keep `precip` at its input dtype (comparison is exact), and use int16 for the whole-cube
+    # dry-day cumsum/accumulators — the spell length can't exceed the series length (< 32767 days ≈ 89 yr).
+    precip = np.asarray(precip)
     is_dry = precip < threshold                          # NaN < x -> False (sea -> not dry)
-    csum = np.cumsum(is_dry.astype("int64"), axis=0)
-    reset = np.where(~is_dry, csum, 0)                   # snapshot the count at each wet day
+    csum = np.cumsum(is_dry.astype("int16"), axis=0)
+    reset = np.where(~is_dry, csum, np.int16(0))         # snapshot the count at each wet day
     running = np.maximum.accumulate(reset, axis=0)       # last wet-day count seen so far
-    return (csum - running).astype("float64")            # steps since that reset
+    return (csum - running).astype("float32")            # steps since that reset

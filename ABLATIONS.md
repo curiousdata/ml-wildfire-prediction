@@ -50,6 +50,63 @@ model, same metric. Reproduce with `scripts/fgdc_ablation.py` (`--groups` for le
 
 ---
 
+### 2026-07-06 — Grid resolution: 4 km vs 2 km → **PROMISING (spread + localization win; ignition AP tie = operational win), gated by COMPUTE**
+- **Idea:** does a finer prediction grid predict fire better? First rung of the finer-resolution branch — coarsen the
+  1 km silver to **2 km** (vs the production **4 km**), rebuild features, train the SAME GBT, compare. (Silver is 1 km,
+  so this needs no new ingest.)
+- **Hypothesis:** the value of finer res is **feature fidelity + localization**, NOT label density (density gets
+  *sparser* — 4× more cells, ~2× more positives). Expect the **spread** regime (coherent front) to gain and **new
+  ignition** (point event) to hold; and expect **AP to under-sell it** (AP mechanically drops as negatives densify),
+  so judge on a **resolution-fair localization** metric measured in KM at a fixed tolerance.
+- **Setup:** 2 km cube built on **2020–2026** (see COMPUTE below — full history OOMs); both grids trained+scored on the
+  **same 2021–2026 window** (2020 = recursive-feature warm-up), prod GBT (neg 30:1, seed 0), `regime_metrics`.
+  Localization = top-0.3%-of-land alert set (fraction → resolution-comparable, same total area); **hit-rate** = % of
+  actual next-day fires with an alert within {4,8} km; **alert-precision** = % of alerts within {4,8} km of a fire.
+  Repro: `scripts/experiments/resolution_ablation.py --factor {4,2} --start 2021-01-01` → `reports/resolution_ablation_{4,2}km.json`.
+- **Result:**
+
+  | metric | 4 km | 2 km | Δ |
+  |---|---|---|---|
+  | new-ignition AP | 0.5573 | 0.5564 | −0.001 (tie) |
+  | spread AP | 0.9718 | 0.9778 | **+0.006** |
+  | overall AP / ROC | 0.718 / 0.924 | 0.744 / 0.931 | +0.026 / +0.007 |
+  | localization hit@4 km | 0.505 | **0.618** | **+0.11** |
+  | localization hit@8 km | 0.551 | **0.691** | **+0.14** |
+  | alert-prec@4 km / prec@K | 0.144 / 0.265 | 0.092 / 0.198 | −0.05 / −0.07 |
+
+  Regime-split localization (hit@4 km / hit@8 km, 4 km → 2 km): **IGNITION 0.30/0.35 → 0.38/0.48** (+0.08/+0.14,
+  i.e. +40% rel. at 8 km) · **SPREAD 0.87/0.93 → 0.96/0.99**. ⇒ the *hard* new-ignition regime localizes meaningfully
+  tighter at 2 km even though its AP is flat — the operational win the AP tie masks. (n grows 4747→5447 ign,
+  2618→3830 spread: a finer grid resolves a fire footprint into more distinct cells.)
+- **Interpretation (the key point):** the new-ignition **AP tie is an OPERATIONAL WIN, not "no gain."** AP measures
+  ranking skill (at MATCHED prevalence = apples-to-apples); a tie means the model discriminates just as well but on
+  **4× smaller cells** → same accuracy, ¼ the area to act on (a 4× tighter search box). The gain is the *resolution of
+  the answer*, invisible to AP. So **finer helps BOTH regimes operationally** (spread shows it in AP+localization;
+  ignition purely in localization), plus a real spread-AP bump. The cost is **noisier per-cell precision** (sparser
+  label → bigger false-alert surface; partly a target-density artifact).
+- **Verdict:** **PROMISING → adopt 2 km via a validated `resolution-2km` branch** (retrain + recalibrate to the ~2×
+  lower prevalence, repoint coarsen/serve to factor 2, regenerate Control-Center display assets + re-anchor the
+  prevalence-based color ramp/tiers, local-container polish, serve smoke test, then merge). Points at a possible
+  **multi-resolution product** but the AP-tie correction says finer likely helps both regimes, so lead with 2 km
+  everywhere. 1 km deferred to its own task (compute below).
+- **⚠️ TRADEOFFS — COMPUTE is the binding constraint (not skill):**
+  - **Area scaling:** 2 km = **4×** cells, 1 km = **16×**, 375 m ≈ 114×. GBT *fit* time scales with POSITIVES (neg-
+    subsampling caps rows) so only ~2× at 2 km; but the **data build / block-loads scale with CELLS** (4× / 16×) and
+    dominate wall-clock.
+  - **17 GB RAM wall (this data box):** whole-cube `build_features` engineered stage holds ~2–3 arrays at 5.8 GB/var
+    at *full-history* 2 km → **OOM**. Worked around by the **2020–2026 subset** (~2.6 GB/var). **1 km is infeasible**
+    on this box: ~500 GB gold (only ~200 GB free) + the RAM wall → needs an **external SSD and/or streaming features
+    from silver** (don't materialize the giant cube). Gold is also ~3.4× denser than silver (dense-float engineered
+    features compress far worse than sparse raw) → float16/bitshuffle/derive-cheap-features would shrink it.
+  - **Tooling gotcha:** `build_features --overwrite` is **broken on modern xarray** ("variable exists, but encoding was
+    provided") — must drop the engineered vars first, then rebuild.
+  - **Display cost:** finer grid ⇒ more/noisier danger-area alerts; and every prevalence-anchored threshold (ramp,
+    tiers, cluster) must be **re-anchored** to the new prevalence (ideally made prevalence-*derived* so it never recurs).
+- **Caveats:** single seed; one window (2021–2026); the alert-precision drop is partly a target-density artifact; 4 km
+  baseline reused the full-history cube (more recursive warm-up than the 2020-started 2 km) — a small asymmetry.
+
+---
+
 ### 2026-07-04 — Multi-satellite fire label: dense-short vs long-sparse vs stitch → **crop DROP · stitch TIE (serve-side already captured it)**
 - **Idea:** with three VIIRS birds now available (S-NPP + NOAA-20 from 2018 + NOAA-21 from 2024), how should the
   **training label** use them? Three target-definitions: `snpp` (S-NPP only, all years — what we ship), `stitch`

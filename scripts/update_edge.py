@@ -37,7 +37,7 @@ from src.data.regions import CCAA_TO_SUBDIV        # shared region map (was dupl
 GOLD = PROJECT / "data" / "gold" / "FireGuard_coarse4.zarr"
 SILVER = PROJECT / "data" / "silver" / "FireGuard.zarr"
 TAIL = 365                          # longest hard lookback (precip_sum_365d, burn_frequency_365d)
-TP_TO_DAILY_MM = 2.9                # must match build_features.TP_TO_DAILY_MM
+TP_TO_DAILY_MM = 24                 # must match build_features.TP_TO_DAILY_MM (fixed 2.9→24, audit 2026-07-07)
 FIRE_THR = 0.5                      # is_fire>0.5 = burned (time_since_last_fire)
 EPS = 1e-6                          # must match seasonal_anomaly eps
 

@@ -48,7 +48,8 @@ from src.data.feature_engineering import (
 from src.data.regions import CCAA_TO_SUBDIV
 
 COMPRESSOR = Blosc(cname="zstd", clevel=3, shuffle=2)
-TP_TO_DAILY_MM = 2.9  # calibrated cumulative-mean -> daily-total factor (AEMET national ~640 mm/yr)
+TP_TO_DAILY_MM = 24   # FGDC ingester writes total_precipitation_mean = daily_sum/24 → ×24 = daily total mm.
+                      # (Was a stale v1 2.9 → land-mean 81 mm/yr; ×24 → 674 mm/yr, matches AEMET ~640. Audit 2026-07-07.)
 FIRE_CONTEXT_VARS = ("dist_to_fire", "fire_upwind_exposure",
                      "precip_sum_7d", "precip_sum_30d", "precip_sum_90d", "precip_sum_180d", "precip_sum_365d")
 
@@ -82,6 +83,8 @@ def fire_context(path: Path, overwrite: bool) -> None:
     coords = {"time": c["time"], "y": c["y"], "x": c["x"]}
 
     def _append(name: str, arr: np.ndarray, attrs: dict | None = None) -> None:
+        if arr.dtype.kind == "f":
+            arr = arr.astype("float16")   # storage: all fire-context outputs are fp16-safe (km dist, precip mm, exposure)
         ds = xr.Dataset({name: (("time", "y", "x"), arr)}, coords=coords)
         if attrs:
             ds[name].attrs = attrs
@@ -95,10 +98,12 @@ def fire_context(path: Path, overwrite: bool) -> None:
             {"description": "(W.d)/|d|^2 downwind-exposure to nearest fire; >0 downwind, <0 upwind."})
     del dist, expo, fire_all
 
-    precip_sum = np.cumsum(c["total_precipitation_mean"].values, axis=0, dtype="float64")  # float64 for accuracy
+    # float32 cumsum: ~7 sig-digits at ~1e4 mm totals → sub-0.001 mm window resolution, and half the
+    # RAM of float64 (5.8 vs 11.6 GB whole-cube). Input .values is already fp16 (2.9 GB).
+    precip_sum = np.cumsum(c["total_precipitation_mean"].values, axis=0, dtype="float32")  # fp16 in, f32 accum (no fp32 copy)
     for N in (7, 30, 90, 180, 365):
-        win = precip_sum.astype("float32")                       # rows < N keep the partial cumsum
-        win[N:] = (precip_sum[N:] - precip_sum[:-N]).astype("float32")   # N-day trailing window
+        win = precip_sum.copy()                                  # rows < N keep the partial cumsum
+        win[N:] = precip_sum[N:] - precip_sum[:-N]               # N-day trailing window
         _append(f"precip_sum_{N}d", win)
         del win
     del precip_sum
@@ -116,9 +121,13 @@ def engineered(path: Path, overwrite: bool) -> None:
 
     existing = set(c.data_vars)
 
+    F32_KEEP = {"time_since_last_fire"}   # can exceed 2048 days → fp16 loses integer precision; keep float32
+
     def append(name, dims, data, attrs=None):
         if name in existing and not overwrite:
             print(f"  skip {name} (exists; use --overwrite)"); return
+        if data.dtype.kind == "f" and name not in F32_KEEP:
+            data = data.astype("float16")   # storage: engineered floats are fp16-safe for HistGBT (255-bin)
         if name in existing:  # mode='a' won't replace an existing var -> delete it first
             import zarr
             g = zarr.open_group(str(path), mode="a")
@@ -145,13 +154,14 @@ def engineered(path: Path, overwrite: bool) -> None:
 
     # --- KBDI (needs tp + t2m_max) ---
     tp = c["total_precipitation_mean"].values
-    daily_rain = (TP_TO_DAILY_MM * tp).astype("float64")
-    R = np.nansum(daily_rain, axis=0) / nyears
-    tmax = c["t2m_max"].values
+    daily_rain = (TP_TO_DAILY_MM * tp).astype("float16")     # keep fp16 (kbdi upcasts per-slice); was float64 11.6 GB
+    del tp                                                   # free the fp16 input before allocating more
+    R = np.nansum(daily_rain, axis=0, dtype="float64") / nyears   # per-grid accumulator stays float64
+    tmax = c["t2m_max"].values                               # fp16 whole-cube (kbdi upcasts per-slice)
     append("kbdi", ("time", "y", "x"),
-           keetch_byram_drought_index(daily_rain, tmax, R).astype("float32"),
+           keetch_byram_drought_index(daily_rain, tmax, R),   # already returns float16 (KBDI ≤ 203.2)
            {"units": "mm", "description": f"Keetch-Byram Drought Index (daily_rain={TP_TO_DAILY_MM}*tp, approx)."})
-    del tp, daily_rain, tmax
+    del daily_rain, tmax
 
     # --- seasonal anomalies (SPI proxy + greenness) — CAUSAL climatology (prior years only): no train/test
     #     leakage and identical to what's available at serve time. ---

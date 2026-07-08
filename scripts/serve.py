@@ -211,7 +211,18 @@ def main():
     ap.add_argument("--alert-thr", type=float, default=0.25)
     ap.add_argument("--overwrite", action="store_true")
     ap.add_argument("--show", action="store_true")
+    ap.add_argument("--factor", type=int, default=4, help="grid factor: 4 (production) or e.g. 2 (resolution-2km). "
+                    "Non-4 repoints to cube coarse{F} + the TAGGED model gbt_fireguard_{F}km + an ISOLATED "
+                    "serving_store_{F}km (keeps the live 4 km store/model untouched until the deliberate cutover).")
     args = ap.parse_args()
+    if args.factor != 4:                       # resolution-migration: repoint cube+model+store, isolated from live 4 km
+        global CUBE, MODEL, CALIBRATOR, STORE
+        tag = f"{args.factor}km"
+        CUBE = M.project_root / "data" / "gold" / f"FireGuard_coarse{args.factor}.zarr"
+        MODEL = M.project_root / "models" / f"gbt_fireguard_{tag}.joblib"
+        CALIBRATOR = M.project_root / "models" / f"gbt_fireguard_{tag}.calibrator.joblib"
+        STORE = M.project_root / "data" / f"serving_store_{tag}"
+        logging.getLogger().info(f"factor {args.factor}: cube={CUBE.name} model={MODEL.name} store={STORE.name}")
     if args.show:
         show(); return
     if args.mode == "live":

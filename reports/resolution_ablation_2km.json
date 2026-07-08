@@ -1,0 +1,28 @@
+{
+  "factor": 2,
+  "cell_km": 2.0,
+  "regime_metrics": {
+    "roc": 0.9309321545178082,
+    "overall_ap": 0.744165440733077,
+    "new_ignition_ap": 0.5564236552984928,
+    "spread_ap": 0.9778350298863832,
+    "prec_at_k": 0.19780101325859653,
+    "n_pos": 9277.0
+  },
+  "localization": {
+    "hit_rate_4km": 0.6183033308181525,
+    "hit_rate_8km": 0.691387301929503,
+    "alert_prec_4km": 0.09178784375760525,
+    "alert_prec_8km": 0.12756297152591872,
+    "ign_hit_4km": 0.3805764641086837,
+    "ign_hit_8km": 0.48246741325500275,
+    "spread_hit_4km": 0.9563968668407311,
+    "spread_hit_8km": 0.9885117493472585,
+    "n_fire": 9277.0,
+    "n_fire_ign": 5447.0,
+    "n_fire_spread": 3830.0,
+    "n_alert": 131488.0
+  },
+  "train_days": 1968,
+  "test_days": 401
+}

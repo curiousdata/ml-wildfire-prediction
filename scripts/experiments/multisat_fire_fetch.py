@@ -45,7 +45,10 @@ def main():
     if not key:
         raise SystemExit("set FIRMS_MAP_KEY")
     CACHE.mkdir(parents=True, exist_ok=True)
-    z = xr.open_zarr(str(grid.ROOT / "data" / "gold" / "FireGuard_coarse4.zarr"), consolidated=True)
+    # --factor F: grid to data/gold/FireGuard_coarse{F}.zarr → data/cache/multisat/fire_{name}_{F}km.npy
+    factor = int(sys.argv[sys.argv.index("--factor") + 1]) if "--factor" in sys.argv else 4
+    suffix = "" if factor == 4 else f"_{factor}km"
+    z = xr.open_zarr(str(grid.ROOT / "data" / "gold" / f"FireGuard_coarse{factor}.zarr"), consolidated=True)
     gx, gy = z["x"].values.astype(float), z["y"].values.astype(float)
     tindex = {d.date().isoformat(): i for i, d in enumerate(pd.DatetimeIndex(z["time"].values))}
     T_, Y, X = z.sizes["time"], z.sizes["y"], z.sizes["x"]
@@ -73,8 +76,8 @@ def main():
             win += 1; d += dt.timedelta(days=w)
             if win % 40 == 0:
                 log.info(f"  {name} {day} ({win} win, {time.time()-t0:.0f}s, {ncell} cell-hits)")
-        np.save(CACHE / f"fire_{name}.npy", arr)
-        log.info(f"[{name}] DONE: {ncell} cell-hits, {nfail} window-fails → {CACHE/f'fire_{name}.npy'} "
+        np.save(CACHE / f"fire_{name}{suffix}.npy", arr)
+        log.info(f"[{name}] DONE: {ncell} cell-hits, {nfail} window-fails → {CACHE/f'fire_{name}{suffix}.npy'} "
                  f"({time.time()-t0:.0f}s)")
 
 

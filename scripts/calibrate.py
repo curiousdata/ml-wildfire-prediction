@@ -54,10 +54,22 @@ def main():
     log = logging.getLogger("calibrate")
     smoke = "--smoke" in sys.argv
     rng = np.random.default_rng(0)
+    # --factor / --tag: calibrate a resolution-migration model (e.g. --factor 2 --tag 2km → the 2km cube + model)
+    factor = int(sys.argv[sys.argv.index("--factor") + 1]) if "--factor" in sys.argv else 4
+    tag = sys.argv[sys.argv.index("--tag") + 1] if "--tag" in sys.argv else ""
+    if factor != 4 and not tag:
+        # tag GUARD: without this, `--factor 2` alone would load the 4 km model, eval it on the 2 km cube,
+        # and OVERWRITE the production calibrator (the 2026-07-06 incident class). Mirror serve.py's auto-tag.
+        tag = f"{factor}km"
+        log.info(f"--factor {factor} without --tag → auto-tagging '{tag}' (production calibrator protected)")
+    cube_path = CUBE if factor == 4 else PROJECT / "data" / "gold" / f"FireGuard_coarse{factor}.zarr"
+    slug = f"gbt_fireguard_{tag}" if tag else "gbt_fireguard"
+    model_path = PROJECT / "models" / f"{slug}.joblib"
+    BLK = max(12, int(200 * (factor / 4) ** 2))           # area-scale block reads (floor 12 keeps RAM/block ~constant at 1km)
 
-    art = joblib.load(MODEL)
+    art = joblib.load(model_path)
     gbt, feats = art["model"], art["features"]            # the model's exact feature list + order
-    z = xr.open_zarr(str(CUBE), consolidated=True)
+    z = xr.open_zarr(str(cube_path), consolidated=True)
     isf = z["is_fire"].values
     Tn = isf.shape[0]
     land = np.nan_to_num(z["is_spain"].values) > 0.5
@@ -68,6 +80,15 @@ def main():
     tmax = Tn - 1 - HORIZON
     cut = int((tmax + 1) * 0.8)                            # IDENTICAL split to train_gbt → genuine held-out
     val_days = list(range(cut, tmax + 1))
+    # --since YYYY-MM-DD: restrict the true-prevalence calibration to a fire-label ERA (e.g. the 6-pass
+    # VIIRS era 2024-04+). The stitched is_fire densifies ~26% at 6-pass, so fitting isotonic on the mixed
+    # 4-/6-pass val and serving on 6-pass would bias display probabilities low. All ≥cut → still held-out.
+    since = sys.argv[sys.argv.index("--since") + 1] if "--since" in sys.argv else None
+    if since:
+        tdates = np.asarray(z["time"].values, dtype="datetime64[D]")
+        sd = np.datetime64(since)
+        val_days = [d for d in val_days if tdates[d] >= sd]
+        log.info(f"--since {since}: restricted calibration to {len(val_days)} val days in [{tdates[val_days[0]]}..{tdates[val_days[-1]]}]")
     stride = max(1, len(val_days) // (40 if smoke else 320))   # true-prevalence DAY sample (bounds runtime; full prevalence per day)
     val_days = val_days[::stride]
     n_cal = int(len(val_days) * 0.6)
@@ -81,10 +102,10 @@ def main():
     def collect(days):                                    # per-day predict over ALL land cells (true prevalence), block-read
         by_block = {}
         for t in days:
-            by_block.setdefault((t // 200) * 200, []).append(t)
+            by_block.setdefault((t // BLK) * BLK, []).append(t)
         ps, ys = [], []
         for b0 in sorted(by_block):
-            block = z[dynamic].isel(time=slice(b0, b0 + 200)).load()
+            block = z[dynamic].isel(time=slice(b0, b0 + BLK)).load()
             for t in by_block[b0]:
                 ps.append(gbt.predict_proba(build_feat(block, t - b0))[:, 1])
                 ys.append((isf[t + 1] > 0.5).astype(np.int8)[land])
@@ -108,16 +129,16 @@ def main():
     log.info(f"ranking preserved: AP raw={average_precision_score(yt, pt):.4f} cal={average_precision_score(yt, pt_cal):.4f} "
              f"| ROC raw={roc_auc_score(yt, pt):.4f} cal={roc_auc_score(yt, pt_cal):.4f}")
 
-    joblib.dump(iso, PROJECT / "models" / "gbt_fireguard.calibrator.joblib")
+    joblib.dump(iso, PROJECT / "models" / f"{slug}.calibrator.joblib")
     _, ece_r, brier_r = reliability(pt, yt); _, ece_c, brier_c = reliability(pt_cal, yt)
-    (PROJECT / "models" / "gbt_fireguard.calibration.json").write_text(json.dumps({
+    (PROJECT / "models" / f"{slug}.calibration.json").write_text(json.dumps({
         "method": "isotonic on true-prevalence held-out VAL (corrects neg-subsample bias); v2 raw-feature block-read",
-        "model": "gbt_fireguard", "n_features": len(feats), "cube": str(CUBE),
+        "model": slug, "n_features": len(feats), "cube": str(cube_path),
         "eval_ece_raw": ece_r, "eval_ece_calibrated": ece_c,
         "eval_brier_raw": brier_r, "eval_brier_calibrated": brier_c,
         "eval_ap_raw": float(average_precision_score(yt, pt)), "eval_ap_calibrated": float(average_precision_score(yt, pt_cal)),
     }, indent=2))
-    log.info(f"saved gbt_fireguard.calibrator.joblib + .calibration.json (ECE {ece_r:.5f} → {ece_c:.5f})")
+    log.info(f"saved {slug}.calibrator.joblib + .calibration.json (ECE {ece_r:.5f} → {ece_c:.5f})")
 
 
 if __name__ == "__main__":
