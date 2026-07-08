@@ -37,7 +37,7 @@ import xarray as xr
 
 from src.data import metrics as M                        # torch-free project_root
 
-CUBE = M.project_root / "data" / "gold" / "FireGuard_coarse4.zarr"
+CUBE = M.project_root / "data" / "gold" / "FireGuard_coarse2.zarr"   # production grid = 2 km (2026-07-08 cutover)
 STORE = M.project_root / "data" / "serving_store"
 MODEL = M.project_root / "models" / "gbt_fireguard.joblib"
 CALIBRATOR = M.project_root / "models" / "gbt_fireguard.calibrator.joblib"
@@ -211,11 +211,11 @@ def main():
     ap.add_argument("--alert-thr", type=float, default=0.25)
     ap.add_argument("--overwrite", action="store_true")
     ap.add_argument("--show", action="store_true")
-    ap.add_argument("--factor", type=int, default=4, help="grid factor: 4 (production) or e.g. 2 (resolution-2km). "
-                    "Non-4 repoints to cube coarse{F} + the TAGGED model gbt_fireguard_{F}km + an ISOLATED "
-                    "serving_store_{F}km (keeps the live 4 km store/model untouched until the deliberate cutover).")
+    ap.add_argument("--factor", type=int, default=2, help="grid factor: 2 (PRODUCTION, default slot) or e.g. 4 "
+                    "(the archived pre-cutover model, for A/B). A non-production factor repoints to cube coarse{F} "
+                    "+ the TAGGED model gbt_fireguard_{F}km + an ISOLATED serving_store_{F}km.")
     args = ap.parse_args()
-    if args.factor != 4:                       # resolution-migration: repoint cube+model+store, isolated from live 4 km
+    if args.factor != 2:                       # A/B on a non-production factor: repoint cube+model+store, isolated
         global CUBE, MODEL, CALIBRATOR, STORE
         tag = f"{args.factor}km"
         CUBE = M.project_root / "data" / "gold" / f"FireGuard_coarse{args.factor}.zarr"

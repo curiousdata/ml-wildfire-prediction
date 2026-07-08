@@ -1,6 +1,7 @@
 {
   "model": "HistGradientBoostingClassifier (FGDC v2, point-wise)",
-  "cube": "/Users/vladimir/ml-wildfire-prediction/data/gold/FireGuard_coarse4_t200.zarr",
+  "cube": "/Users/vladimir/ml-wildfire-prediction/data/gold/FireGuard_coarse2.zarr",
+  "factor": 2,
   "n_features": 135,
   "features": [
     "CLC_2018_1",
@@ -152,13 +153,13 @@
   },
   "n_iter": 400,
   "val": {
-    "roc": 0.9315594017767962,
-    "overall_ap": 0.7483871285819744,
-    "new_ignition_ap": 0.6215015019022881,
-    "spread_ap": 0.9835031739609176,
-    "prec_at_k": 0.32297417024466707,
-    "n_pos": 14673
+    "roc": 0.9360841597934559,
+    "overall_ap": 0.7614662166542407,
+    "new_ignition_ap": 0.6109288288330723,
+    "spread_ap": 0.9830681537443515,
+    "prec_at_k": 0.31003214653969796,
+    "n_pos": 32974
   },
-  "split": "chrono 80/20 of 5264 days (train \u2264 4211)",
+  "split": "chrono 80/20 of 5291 days (train \u2264 4232)",
   "note": "v1-comparable new-ign AP at matched 15:1 prevalence; label=VIIRS active-fire (vs v1 EFFIS)."
 }

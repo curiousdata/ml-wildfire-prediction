@@ -30,7 +30,7 @@ from src.data.ingest import grid
 from src.data.ingest import ingest_weather as IW
 from src.data.ingest import ingest_fire as IF
 
-CUBE = grid.ROOT / "data" / "gold" / "FireGuard_coarse4.zarr"
+CUBE = grid.ROOT / "data" / "gold" / "FireGuard_coarse2.zarr"   # production grid = 2 km (2026-07-08 cutover)
 FETCH_STEP = 0.25                                    # native ~0.25°
 BAND_CACHE = grid.ROOT / "data" / "serving_store" / "band_cache"
 REFETCH_RECENT_DAYS = 2   # always re-fetch the newest N band days (Open-Meteo archive is IFS-provisional there and

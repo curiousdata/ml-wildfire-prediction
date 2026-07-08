@@ -1,12 +1,12 @@
 {
   "method": "isotonic on true-prevalence held-out VAL (corrects neg-subsample bias); v2 raw-feature block-read",
-  "model": "gbt_fireguard",
+  "model": "gbt_fireguard_2km",
   "n_features": 135,
-  "cube": "/Users/vladimir/ml-wildfire-prediction/data/gold/FireGuard_coarse4_t200.zarr",
-  "eval_ece_raw": 0.010857985474326558,
-  "eval_ece_calibrated": 7.252351554403659e-05,
-  "eval_brier_raw": 0.0018953708205017281,
-  "eval_brier_calibrated": 0.0004933668259829851,
-  "eval_ap_raw": 0.2029126771001964,
-  "eval_ap_calibrated": 0.1933834417482661
+  "cube": "/Users/vladimir/ml-wildfire-prediction/data/gold/FireGuard_coarse2.zarr",
+  "eval_ece_raw": 0.011697432564001166,
+  "eval_ece_calibrated": 0.001122528734437574,
+  "eval_brier_raw": 0.0019916151088468564,
+  "eval_brier_calibrated": 0.00039088484733612063,
+  "eval_ap_raw": 0.17306381023553197,
+  "eval_ap_calibrated": 0.16523344408192464
 }
