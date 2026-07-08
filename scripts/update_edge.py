@@ -34,7 +34,7 @@ import xarray as xr
 from src.data import feature_engineering as FE
 from src.data.regions import CCAA_TO_SUBDIV        # shared region map (was duplicated here + add_engineered)
 
-GOLD = PROJECT / "data" / "gold" / "FireGuard_coarse4.zarr"
+GOLD = PROJECT / "data" / "gold" / "FireGuard_coarse2.zarr"   # production grid = 2 km (2026-07-08 cutover)
 SILVER = PROJECT / "data" / "silver" / "FireGuard.zarr"
 TAIL = 365                          # longest hard lookback (precip_sum_365d, burn_frequency_365d)
 TP_TO_DAILY_MM = 24                 # must match build_features.TP_TO_DAILY_MM (fixed 2.9→24, audit 2026-07-07)
