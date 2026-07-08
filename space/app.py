@@ -35,25 +35,30 @@ STORE = Path("/data") if (Path("/data") / "grids").exists() else ROOT / "store"
 ASSETS = ROOT / "display_assets.npz"
 SERVING_REPO = os.getenv("FIREGUARD_SERVING_REPO", "curiousdata/fireguard-serving")
 FORCE_LOCAL = os.getenv("FIREGUARD_LOCAL_STORE") == "1"
-CELL_KM2 = 16.0
-# ALERT tiers re-anchored to PREVALENCE multiples (base rate ≈7e-4): moderate ≈7×, elevated ≈28×, high ≈100×.
-# (The old 0.5/0.2/0.05 almost never triggered — calibrated per-cell probs are tiny.)
-HIGH, ELEV, MOD = 0.07, 0.02, 0.005
-# Map colour ramp = LOG scale over the calibrated-probability dynamic range. Per-cell next-day probs are tiny and
-# heavy-tailed (prevalence ≈ 7e-4; median ~1e-4, p99 ~4e-3, rare cells → 0.6), so a LINEAR ramp anchored to the
-# alert tiers shows almost nothing. Log-ramp from RAMP_FLOOR (≈3× prevalence; below → transparent so quiet days
-# stay dark) to RAMP_CAP (≈100× prevalence → full red). Absolute → comparable across days.
-RAMP_FLOOR, RAMP_CAP = 0.0013, 0.013  # FLOOR = pixel count; CAP = how hot the field runs (rolled back — was too red)
+CELL_KM2 = 4.0    # 2 km cell area (was 16.0 at 4 km) — drives exp_cells / per-area aggregates
+# Colour + alert anchoring is PREVALENCE-DERIVED: everything scales off BASE_RATE = the measured per-cell next-day
+# fire prevalence (mean calibrated prob over land). MEASURED for the 2 km 3-bird KBDI-fixed cube on a 30-day
+# 6-pass replay to 2026-06-27 = 1.276e-3. ⚠️ RE-MEASURE + update BASE_RATE on any resolution / label / calibrator
+# change (the 4 km value was ≈7e-4). Multiples below are preserved from the 4 km tuning, so semantics carry over.
+BASE_RATE = 1.276e-3
+# ALERT tiers as prevalence multiples: moderate ≈7×, elevated ≈28×, high ≈100× base. (Calibrated per-cell probs are
+# tiny + heavy-tailed, so the old fixed 0.5/0.2/0.05 almost never triggered.)
+HIGH, ELEV, MOD = 100 * BASE_RATE, 28 * BASE_RATE, 7 * BASE_RATE
+# Map colour ramp = LOG scale over the calibrated-prob dynamic range. Log-ramp from RAMP_FLOOR (≈1.9× base ≈ land
+# p90; below → transparent so quiet days/noise floor stay dark) to RAMP_CAP (≈19× base ≈ land p99–p99.9 → full red).
+# Absolute (day-comparable), reveals the whole heavy-tailed field instead of clipping to black.
+RAMP_FLOOR, RAMP_CAP = 1.9 * BASE_RATE, 19 * BASE_RATE
 _LF = float(np.log(RAMP_FLOOR)); _LS = float(np.log(RAMP_CAP) - np.log(RAMP_FLOOR))
-CLUSTER_THR = 0.006                    # cells above this seed/join the danger-area watershed
+CLUSTER_THR = 8.6 * BASE_RATE          # cells above this (≈p99) seed/join the danger-area watershed
 CLUSTER_MIN_P = 0.10                   # surface every area with ≥ this aggregate P(≥1 ignition) — the (only) knob
 # feature → human cause phrase, in the RISK-RAISING direction (for the danger-area hover; never show raw names)
 CAUSE_MAP = [
-    (("dist_to_fire", "fire_upwind_exposure", "time_since_last_fire"), "near active fire"),
-    (("kbdi", "spi_90d", "days_since_rain", "precip_sum_90d", "precip_sum_180d"), "very dry ground"),
+    (("dist_to_fire", "fire_upwind_exposure"), "near active fire"),   # CURRENT proximity only (time_since = history)
+    (("kbdi", "spi_90d", "precip_sum_90d", "precip_sum_180d"), "very dry ground"),   # low spi/precip, high kbdi = dry
     (("t2m_max", "t2m_mean"), "extreme heat"),
-    (("ffwi", "hdw", "vpd_peak", "wind_speed_max", "rh_min"), "hot-dry-windy weather"),
-    (("emc_peak", "ndvi_anomaly", "fvc", "lai_anomaly", "ndvi"), "dry, abundant fuel"),
+    (("ffwi", "wind_speed_max", "RH_min"), "hot-dry-windy weather"),   # RH_min low = dry (was 'rh_min' — never matched)
+    (("emc_peak", "ndvi_anomaly", "fvc", "lai_anomaly"), "dry, abundant fuel"),   # (NDVI dropped — ambiguous direction)
+    (("time_since_last_fire",), "long-unburned fuel buildup"),   # HIGH time-since = fuel accumulation = ↑risk
     (("popdens", "dist_to_roads_mean", "dist_to_roads_stdev", "dist_to_urban"), "close to people & roads"),
     (("burn_frequency_365d",), "recent fire history"),
 ]
@@ -104,15 +109,6 @@ def risk_band(p):
 @st.cache_resource(show_spinner=False)
 def load_ccaa():
     return np.load(ASSETS)["ccaa"].astype(int)
-
-
-@st.cache_data(show_spinner=False)
-def load_importance():
-    p = ROOT / "gbt_coarse4.importance.json"
-    if not p.exists():
-        return None
-    d = json.loads(p.read_text())
-    return {r: [t["feature"] for t in v["top"]] for r, v in d.get("regimes", {}).items()}
 
 
 def _unpack_grid(d, *, issue=None, target=None, source=None, mtime=None, prelim=False):
@@ -275,21 +271,27 @@ def danger_clusters(prob, regime, ccaa, drivers, x, y, fwd):
     for uid in np.unique(key):
         if uid == 0:
             continue
-        cells = key == uid
-        pagg = 1.0 - float(np.prod(1.0 - np.clip(prob[cells], 0, 0.99)))
-        if pagg < CLUSTER_MIN_P:
-            continue
-        rr, cc = np.where(cells)
-        lon, lat = fwd.transform(float(x[cc].mean()), float(y[rr].mean()))
-        rad = max((x[cc.max()] - x[cc.min()]) / 2, abs(y[rr.max()] - y[rr.min()]) / 2, dx) + dx / 2
-        reg_spread = float((regime[cells] == 2).mean()) > 0.5
-        rc = ccaa[cells]; rc = rc[rc > 0]
-        region = CCAA.get(int(np.bincount(rc).argmax()), "") if rc.size else ""
-        causes = sp if reg_spread else ig
-        what = "fire spread" if reg_spread else "a new fire"
-        tip = (f"{region + ' — ' if region else ''}up to ~{pagg * 100:.0f}% chance of {what} here tomorrow"
-               + (" · " + " · ".join(causes) if causes else ""))
-        out.append((pagg, float(lat), float(lon), float(rad), tip))
+        comp, ncomp = label(key == uid)               # a uid can be spatially DISCONNECTED → one area per piece
+        for ci in range(1, ncomp + 1):
+            cells = comp == ci
+            pc = prob[cells]
+            pagg = 1.0 - float(np.prod(1.0 - np.clip(pc, 0, 0.99)))
+            if pagg < CLUSTER_MIN_P:
+                continue
+            rr, cc = np.where(cells)
+            j = int(np.argmax(pc))                    # PEAK cell → marker on the brightest spot, not a saddle/gap
+            lon, lat = fwd.transform(float(x[cc[j]]), float(y[rr[j]]))
+            rad = max((x[cc.max()] - x[cc.min()]) / 2, abs(y[rr.max()] - y[rr.min()]) / 2, dx) + dx / 2
+            reg_spread = float((regime[cells] == 2).mean()) > 0.5
+            rc = ccaa[cells]; rc = rc[rc > 0]
+            region = CCAA.get(int(np.bincount(rc).argmax()), "") if rc.size else ""
+            causes = list(sp if reg_spread else ig)
+            if not reg_spread:                        # ignition areas are >6 km from fire (regime def) — not "near" it
+                causes = [c for c in causes if c != "near active fire"]
+            what = "fire spread" if reg_spread else "a new fire"
+            tip = (f"{region + ' — ' if region else ''}up to ~{pagg * 100:.0f}% chance of {what} here tomorrow"
+                   + (" · " + " · ".join(causes) if causes else ""))
+            out.append((pagg, float(lat), float(lon), float(rad), tip))
     out.sort(reverse=True)                        # most dangerous first (no count cap — MIN_P governs)
     return [(lat, lon, rad, tip) for _, lat, lon, rad, tip in out]
 
@@ -514,7 +516,6 @@ st.markdown("""<style>
 
 ccaa = load_ccaa()
 idxmap, bounds = reproj_index()
-importance = load_importance()
 S = latest_store()
 if not S:
     st.markdown("<div class='fg-title'>Fire Guard Control Center</div>", unsafe_allow_html=True)
@@ -601,9 +602,6 @@ with cT:
     drv = S.get("drivers") or {}
     ig = [pretty(d["feature"]) for d in drv.get("ignition", [])][:3]
     sp = [pretty(d["feature"]) for d in drv.get("spread", [])][:3]
-    if not (ig or sp) and importance:
-        ig = [pretty(f) for f in importance.get("ignition", [])[:3]]
-        sp = [pretty(f) for f in importance.get("spread", [])[:3]]
     drv_html = ""
     if ig:
         drv_html += f"<div class='drivers'><span class='muted'>ignition drivers</span> · {' · '.join(ig)}</div>"
