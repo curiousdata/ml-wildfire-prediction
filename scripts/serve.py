@@ -14,7 +14,7 @@ Modes:
                scoreable only after its afternoon SNPP pass settles. [phase B — not built yet; raises w/ guidance.]
 
 v2 vs the legacy v1 job: `gbt_fireguard` + `FGDC_FEATURE_VARS`, **raw** features (no normalization — the GBT is
-trained raw), **torch-free** (`src.data.metrics`), reads `FireGuard_coarse4.zarr`, and **no warm-start**.
+trained raw), **torch-free** (`src.data.metrics`), reads `FireGuard_coarse2.zarr`, and **no warm-start**.
 Idempotent (skips a logged date unless --overwrite). Inspect with --show.
 """
 from __future__ import annotations
