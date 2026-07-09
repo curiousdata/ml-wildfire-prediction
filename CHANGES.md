@@ -59,6 +59,12 @@ KBDI-fixed retrain lands.
   zero-fire plausibility check is now a monitoring *flag*, not a cache *gate*; total blindness is still caught by
   the FIRMS-key hard-fail, transient outages by the refetch window). Verified: with every day zero-fire the warm
   fetch stays bounded (~refetch window) instead of ballooning.
+- **[review] Space danger-cluster/blur kernels were fixed in PIXELS → halved in physical scale at 2 km.** The
+  colour/prevalence constants were re-anchored but `gaussian_filter(1.2)`, `maximum_filter(size=5)` (peak
+  separation) and `GaussianBlur(0.8)` operate on the grid raster, so at 2 km their physical extent halved (20→10 km
+  peak separation) → hotspots fragmented into more, smaller danger areas. FIX: express them in **physical km**
+  (`CLUSTER_SMOOTH_KM`/`CLUSTER_PEAKSEP_KM`/`RISK_BLUR_KM`) and derive cells from `CELL_KM` — auto-scales on the next
+  resolution change. Verified: seeds merge 285→107 on a real 2 km grid, holding the tuned 20 km separation.
 
 ## 2026-07-08 — audit proceed pass: robustness quick-wins applied (KBDI deliberately deferred)
 

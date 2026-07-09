@@ -36,6 +36,12 @@ ASSETS = ROOT / "display_assets.npz"
 SERVING_REPO = os.getenv("FIREGUARD_SERVING_REPO", "curiousdata/fireguard-serving")
 FORCE_LOCAL = os.getenv("FIREGUARD_LOCAL_STORE") == "1"
 CELL_KM2 = 4.0    # 2 km cell area (was 16.0 at 4 km) — drives exp_cells / per-area aggregates
+CELL_KM = CELL_KM2 ** 0.5    # grid cell size (km). The spatial kernels below are PHYSICAL (km) and converted to
+                             # cells at use, so they hold their real-world extent across resolutions (they were
+                             # hardcoded in 4 km pixels: gaussian 1.2, maximum_filter 5, GaussianBlur 0.8).
+CLUSTER_SMOOTH_KM = 4.8      # danger-area pre-peak smoothing (1.2 cells × 4 km)
+CLUSTER_PEAKSEP_KM = 20.0    # min separation between danger-area peaks (maximum_filter size 5 × 4 km)
+RISK_BLUR_KM = 3.2           # cosmetic risk-glow blur (GaussianBlur 0.8 × 4 km)
 # Colour + alert anchoring is PREVALENCE-DERIVED: everything scales off BASE_RATE = the measured per-cell next-day
 # fire prevalence (mean calibrated prob over land). MEASURED for the 2 km 3-bird KBDI-fixed cube on a 30-day
 # 6-pass replay to 2026-06-27 = 1.276e-3. ⚠️ RE-MEASURE + update BASE_RATE on any resolution / label / calibrator
@@ -254,8 +260,9 @@ def danger_clusters(prob, regime, ccaa, drivers, x, y, fwd):
     mask = (prob > CLUSTER_THR) & land
     if not mask.any():
         return []
-    ps = gaussian_filter(prob.astype(np.float64), 1.2)                       # smooth → stable, meaningful peaks
-    lbl, n = label((maximum_filter(ps, size=5) <= ps) & mask)               # each hotspot (local max) seeds a basin
+    ps = gaussian_filter(prob.astype(np.float64), CLUSTER_SMOOTH_KM / CELL_KM)   # smooth → stable, meaningful peaks
+    sep = max(3, round(CLUSTER_PEAKSEP_KM / CELL_KM))                        # peak-separation window in CELLS (res-scaled)
+    lbl, n = label((maximum_filter(ps, size=sep) <= ps) & mask)             # each hotspot (local max) seeds a basin
     if n == 0:
         return []
     cost = (255 * (1.0 - np.clip(ps / max(ps.max(), 1e-9), 0, 1))).astype(np.uint8)   # high risk = low cost
@@ -335,7 +342,7 @@ def build_map_html(prob_bytes, fire_bytes, regime_bytes, shape, issue, target, d
                    zoom_control=True, control_scale=False)
     # risk glow (dark base shows through where risk≈0 — no land tint), softened; crisp cyan active fire on top
     pr = gather(prob, _idxmap); fr = np.nan_to_num(gather(fire, _idxmap))
-    risk = np.array(Image.fromarray(risk_rgba(pr)).filter(ImageFilter.GaussianBlur(0.8)))
+    risk = np.array(Image.fromarray(risk_rgba(pr)).filter(ImageFilter.GaussianBlur(RISK_BLUR_KM / CELL_KM)))
     layer = alpha_over(risk, fire_rgba(fr > 0.5))                        # cyan fire crisp on top
     url = "data:image/png;base64," + base64.b64encode(png(layer)).decode()
     folium.raster_layers.ImageOverlay(image=url, bounds=[[la0, lo0], [la1, lo1]], opacity=0.96, zindex=2).add_to(m)
