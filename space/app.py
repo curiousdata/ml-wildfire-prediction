@@ -50,10 +50,10 @@ BASE_RATE = 1.276e-3
 # ALERT tiers as prevalence multiples: moderate ≈7×, elevated ≈28×, high ≈100× base. (Calibrated per-cell probs are
 # tiny + heavy-tailed, so the old fixed 0.5/0.2/0.05 almost never triggered.)
 HIGH, ELEV, MOD = 100 * BASE_RATE, 28 * BASE_RATE, 7 * BASE_RATE
-# Map colour ramp = LOG scale over the calibrated-prob dynamic range. Log-ramp from RAMP_FLOOR (≈1.9× base ≈ land
-# p90; below → transparent so quiet days/noise floor stay dark) to RAMP_CAP (≈19× base ≈ land p99–p99.9 → full red).
+# Map colour ramp = LOG scale over the calibrated-prob dynamic range. Log-ramp from RAMP_FLOOR (≈1.3× base ≈ land
+# p85; below → transparent so quiet days/noise floor stay dark) to RAMP_CAP (≈19× base ≈ land p99–p99.9 → full red).
 # Absolute (day-comparable), reveals the whole heavy-tailed field instead of clipping to black.
-RAMP_FLOOR, RAMP_CAP = 1.9 * BASE_RATE, 19 * BASE_RATE
+RAMP_FLOOR, RAMP_CAP = 1.3 * BASE_RATE, 19 * BASE_RATE   # lower floor → more low-risk pixels visible (as dark red)
 _LF = float(np.log(RAMP_FLOOR)); _LS = float(np.log(RAMP_CAP) - np.log(RAMP_FLOOR))
 CLUSTER_THR = 8.6 * BASE_RATE          # cells above this (≈p99) seed/join the danger-area watershed
 CLUSTER_MIN_P = 0.10                   # surface every area with ≥ this aggregate P(≥1 ignition) — the (only) knob
@@ -224,10 +224,10 @@ def risk_rgba(prob):
     p = np.clip(np.nan_to_num(prob), 0, 1)
     with np.errstate(divide="ignore"):
         t = np.clip((np.log(np.maximum(p, 1e-12)) - _LF) / _LS, 0.0, 1.0)   # 0 at FLOOR, 1 at CAP (log position)
-    DR = np.array([245, 68, 28.]); OR = np.array([255, 150, 38.]); YL = np.array([255, 246, 190.])  # VIVID red-orange→orange→white-yellow
+    DR = np.array([150, 22, 16.]); OR = np.array([255, 130, 34.]); YL = np.array([255, 246, 190.])  # DARK-red → orange → white-yellow
     lo = (t < 0.5)[..., None]; f = np.where(t < 0.5, t * 2, (t - 0.5) * 2)[..., None]
     rgb = np.where(lo, DR, OR) * (1 - f) + np.where(lo, OR, YL) * f
-    a = np.where(p > RAMP_FLOOR, np.clip(140 + 108 * (t ** 0.8), 0, 250), 0.0)   # bright + opaque; value-driven brightness now
+    a = np.where(p > RAMP_FLOOR, np.clip(90 + 165 * (t ** 1.4), 0, 255), 0.0)   # steeper, more-opaque top: low dark-red ~90 → top fully opaque 255
     rgba = np.zeros((*p.shape, 4), np.uint8)
     rgba[..., :3] = rgb.astype(np.uint8); rgba[..., 3] = a.astype(np.uint8)
     return rgba
