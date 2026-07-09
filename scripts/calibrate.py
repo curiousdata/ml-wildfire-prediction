@@ -25,8 +25,9 @@ import numpy as np
 import xarray as xr
 from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import average_precision_score, roc_auc_score
+from src.data.ingest import grid                                   # PRODUCTION_FACTOR + gold_cube (source of truth)
 
-CUBE = PROJECT / "data" / "gold" / "FireGuard_coarse4_t200.zarr"   # the model's training cube (block-read friendly)
+CUBE = grid.gold_cube()                                            # production gold cube (grid.PRODUCTION_FACTOR)
 MODEL = PROJECT / "models" / "gbt_fireguard.joblib"
 HORIZON = 1
 
@@ -55,14 +56,14 @@ def main():
     smoke = "--smoke" in sys.argv
     rng = np.random.default_rng(0)
     # --factor / --tag: calibrate a resolution-migration model (e.g. --factor 2 --tag 2km → the 2km cube + model)
-    factor = int(sys.argv[sys.argv.index("--factor") + 1]) if "--factor" in sys.argv else 4
+    factor = int(sys.argv[sys.argv.index("--factor") + 1]) if "--factor" in sys.argv else grid.PRODUCTION_FACTOR
     tag = sys.argv[sys.argv.index("--tag") + 1] if "--tag" in sys.argv else ""
-    if factor != 4 and not tag:
-        # tag GUARD: without this, `--factor 2` alone would load the 4 km model, eval it on the 2 km cube,
-        # and OVERWRITE the production calibrator (the 2026-07-06 incident class). Mirror serve.py's auto-tag.
+    if factor != grid.PRODUCTION_FACTOR and not tag:
+        # tag GUARD keyed off PRODUCTION_FACTOR: a NON-production factor must not load+eval on a mismatched cube and
+        # OVERWRITE the production calibrator (the 2026-07-06 incident class). Bare = production; others auto-tag.
         tag = f"{factor}km"
-        log.info(f"--factor {factor} without --tag → auto-tagging '{tag}' (production calibrator protected)")
-    cube_path = CUBE if factor == 4 else PROJECT / "data" / "gold" / f"FireGuard_coarse{factor}.zarr"
+        log.info(f"--factor {factor} != production {grid.PRODUCTION_FACTOR} without --tag → auto-tagging '{tag}' (production calibrator protected)")
+    cube_path = grid.gold_cube(factor)
     slug = f"gbt_fireguard_{tag}" if tag else "gbt_fireguard"
     model_path = PROJECT / "models" / f"{slug}.joblib"
     BLK = max(12, int(200 * (factor / 4) ** 2))           # area-scale block reads (floor 12 keeps RAM/block ~constant at 1km)

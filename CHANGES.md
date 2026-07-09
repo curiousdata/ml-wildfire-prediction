@@ -45,6 +45,20 @@ KBDI-fixed retrain lands.
 - **`seasonal_anomaly` fp16 overflow → `inf`.** `eps=1e-6` is far below NDVI's 0–1 scale, so near-constant cells
   produced z-scores to ~48 000 → `inf` when stored fp16. Added a ±10σ clip (both branches; NaN-preserving) — a
   degenerate-cell numerical artifact, not signal. Recomputed spi/ndvi/lai anomalies: `inf=0`.
+- **[review] Cutover left the trainers keyed to factor 4 → bare retrain would corrupt the 2 km production slot.**
+  A high-effort review of the cutover caught that serve/weekly/update_edge were repointed to factor 2 but
+  `train_gbt`/`calibrate`/`gbt_importance` still defaulted to factor 4 with a `!= 4` tag-guard: `train_gbt` (bare)
+  would train a 4 km model into the live `gbt_fireguard.joblib`, bare `calibrate` would eval the 2 km model on the
+  4 km cube and overwrite the production calibrator, and `--factor 2` auto-tagged *away* from the production slot.
+  FIX: a single **`grid.PRODUCTION_FACTOR` (=2) + `grid.gold_cube(factor)`** source of truth; all seven factor-aware
+  scripts key their default cube + guard off it (bare = production, only OTHER factors auto-tag) — collapsing the
+  "production = 2 km" literals that were scattered across ~8 files.
+- **[review] Serve band-cache: a zero-fire (or crash-uncached) day re-expanded the fetch to the whole band.** An
+  uncached day stayed in `fetch_days` forever, so `_fetch_days`' `date_range(min, today)` re-grew to the full band
+  — re-tripping the Open-Meteo hourly limit the cache exists to avoid. FIX: **always cache** fetched days (the
+  zero-fire plausibility check is now a monitoring *flag*, not a cache *gate*; total blindness is still caught by
+  the FIRMS-key hard-fail, transient outages by the refetch window). Verified: with every day zero-fire the warm
+  fetch stays bounded (~refetch window) instead of ballooning.
 
 ## 2026-07-08 — audit proceed pass: robustness quick-wins applied (KBDI deliberately deferred)
 

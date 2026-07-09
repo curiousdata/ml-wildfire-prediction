@@ -36,8 +36,9 @@ import pandas as pd
 import xarray as xr
 
 from src.data import metrics as M                        # torch-free project_root
+from src.data.ingest import grid                         # PRODUCTION_FACTOR + gold_cube (source of truth)
 
-CUBE = M.project_root / "data" / "gold" / "FireGuard_coarse2.zarr"   # production grid = 2 km (2026-07-08 cutover)
+CUBE = grid.gold_cube()                                  # production gold cube (grid.PRODUCTION_FACTOR = 2 km)
 STORE = M.project_root / "data" / "serving_store"
 MODEL = M.project_root / "models" / "gbt_fireguard.joblib"
 CALIBRATOR = M.project_root / "models" / "gbt_fireguard.calibrator.joblib"
@@ -211,14 +212,15 @@ def main():
     ap.add_argument("--alert-thr", type=float, default=0.25)
     ap.add_argument("--overwrite", action="store_true")
     ap.add_argument("--show", action="store_true")
-    ap.add_argument("--factor", type=int, default=2, help="grid factor: 2 (PRODUCTION, default slot) or e.g. 4 "
-                    "(the archived pre-cutover model, for A/B). A non-production factor repoints to cube coarse{F} "
-                    "+ the TAGGED model gbt_fireguard_{F}km + an ISOLATED serving_store_{F}km.")
+    ap.add_argument("--factor", type=int, default=grid.PRODUCTION_FACTOR, help="grid factor: production (default, "
+                    "grid.PRODUCTION_FACTOR) uses the bare slot; a non-production factor (e.g. 4, the archived "
+                    "pre-cutover model, for A/B) repoints to cube coarse{F} + TAGGED gbt_fireguard_{F}km + ISOLATED "
+                    "serving_store_{F}km.")
     args = ap.parse_args()
-    if args.factor != 2:                       # A/B on a non-production factor: repoint cube+model+store, isolated
+    if args.factor != grid.PRODUCTION_FACTOR:  # A/B on a non-production factor: repoint cube+model+store, isolated
         global CUBE, MODEL, CALIBRATOR, STORE
         tag = f"{args.factor}km"
-        CUBE = M.project_root / "data" / "gold" / f"FireGuard_coarse{args.factor}.zarr"
+        CUBE = grid.gold_cube(args.factor)
         MODEL = M.project_root / "models" / f"gbt_fireguard_{tag}.joblib"
         CALIBRATOR = M.project_root / "models" / f"gbt_fireguard_{tag}.calibrator.joblib"
         STORE = M.project_root / "data" / f"serving_store_{tag}"

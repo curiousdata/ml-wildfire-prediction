@@ -26,6 +26,16 @@ Y0, DY, NY = 2492195.9911, -1000.0, 920      # northing: top → bottom (−, ar
 ROOT = Path(__file__).resolve().parents[3]
 V1_CUBE = ROOT / "data" / "gold" / "IberFire_coarse4.zarr"
 COARSEN_FACTOR = 4                            # 1 km → 4 km gold, matching v1
+PRODUCTION_FACTOR = 2                          # served grid resolution — SINGLE SOURCE OF TRUTH (4→2 km cutover,
+                                               # 2026-07-08). serve / batch / speed AND train / calibrate / importance
+                                               # key their default cube + tag-guard off this; bump it on the next
+                                               # resolution change instead of editing literals across ~8 files.
+
+
+def gold_cube(factor: int = PRODUCTION_FACTOR) -> "Path":
+    """Gold cube path for a grid factor: data/gold/FireGuard_coarse{F}.zarr. (A legacy 4 km block-rechunked
+    `_t200` training copy still exists on disk but is no longer referenced now that production is 2 km.)"""
+    return ROOT / "data" / "gold" / f"FireGuard_coarse{factor}.zarr"
 
 
 def x_coords() -> np.ndarray:

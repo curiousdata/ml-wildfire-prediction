@@ -24,9 +24,10 @@ import xarray as xr
 from sklearn.inspection import permutation_importance
 
 from src.data import metrics as M
+from src.data.ingest import grid                       # PRODUCTION_FACTOR + gold_cube (source of truth)
 
 PROJECT = M.project_root
-CUBE = PROJECT / "data" / "gold" / "FireGuard_coarse4_t200.zarr"
+CUBE = grid.gold_cube()                                # production gold cube (grid.PRODUCTION_FACTOR)
 REGIME_KM = 6.0
 HORIZON = 1
 TOPK = 8
@@ -38,12 +39,12 @@ def main():
     import logging
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     log = logging.getLogger("gbt_importance")
-    factor = int(sys.argv[sys.argv.index("--factor") + 1]) if "--factor" in sys.argv else 4
+    factor = int(sys.argv[sys.argv.index("--factor") + 1]) if "--factor" in sys.argv else grid.PRODUCTION_FACTOR
     tag = sys.argv[sys.argv.index("--tag") + 1] if "--tag" in sys.argv else ""
-    if factor != 4 and not tag:
+    if factor != grid.PRODUCTION_FACTOR and not tag:
         tag = f"{factor}km"
-        log.info(f"--factor {factor} without --tag → auto-tagging '{tag}'")
-    cube_path = CUBE if factor == 4 else PROJECT / "data" / "gold" / f"FireGuard_coarse{factor}.zarr"
+        log.info(f"--factor {factor} != production {grid.PRODUCTION_FACTOR} without --tag → auto-tagging '{tag}'")
+    cube_path = grid.gold_cube(factor)
     slug = f"gbt_fireguard_{tag}" if tag else "gbt_fireguard"
     BLK = max(12, int(200 * (factor / 4) ** 2))            # area-scaled block reads (matches train/calibrate)
 

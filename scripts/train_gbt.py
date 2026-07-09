@@ -23,6 +23,7 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 
 from src.data import metrics as T          # torch-free regime_metrics + project_root
 from src.data.features import FGDC_FEATURE_VARS
+from src.data.ingest import grid           # PRODUCTION_FACTOR + gold_cube (single source of truth)
 
 _WX_PREFIX = ("t2m_", "RH_", "surface_pressure_", "wind_", 
               "total_precipitation_", "soil_")
@@ -30,7 +31,7 @@ WEATHER_LEAD_VARS = {f for f in FGDC_FEATURE_VARS
                      if f.startswith(_WX_PREFIX) 
                      or f in ("ffwi", "emc_peak")}
 
-CUBE = T.project_root / "data" / "gold" / "FireGuard_coarse4_t200.zarr"
+CUBE = grid.gold_cube()                          # production gold cube (grid.PRODUCTION_FACTOR)
 REGIME_KM = 6.0          # v1's regime_dist_cells=1.5 × 4 km cell → spread if dist_to_fire(t) ≤ 6 km
 NEG_RATIO = 30           # train negatives kept per positive (per day), to bound the rare-event matrix
 
@@ -44,15 +45,16 @@ def main():
     # output model so an ablation run never clobbers the production gbt_fireguard.joblib slot.
     drop = set(sys.argv[sys.argv.index("--drop") + 1].split(",")) if "--drop" in sys.argv else set()
     tag = sys.argv[sys.argv.index("--tag") + 1] if "--tag" in sys.argv else ""
-    # --factor F: train on data/gold/FireGuard_coarse{F}.zarr (F=4 → the block-rechunked _t200). Resolution
-    # migration (finer-resolution branch): REGIME_KM is in km so it's resolution-independent; feature ORDER unchanged.
-    factor = int(sys.argv[sys.argv.index("--factor") + 1]) if "--factor" in sys.argv else 4
-    if factor != 4 and not tag:
-        # tag GUARD: a non-production factor must never write the default gbt_fireguard.* slot (the live
-        # deploy — see the 2026-07-06 serve-artifact-tagging incident). Mirror serve.py's auto-derived tag.
+    # --factor F: train on data/gold/FireGuard_coarse{F}.zarr. Default = grid.PRODUCTION_FACTOR (the served grid),
+    # so a bare run retrains PRODUCTION; REGIME_KM is in km (resolution-independent); feature ORDER unchanged.
+    factor = int(sys.argv[sys.argv.index("--factor") + 1]) if "--factor" in sys.argv else grid.PRODUCTION_FACTOR
+    if factor != grid.PRODUCTION_FACTOR and not tag:
+        # tag GUARD: a NON-production factor must never write the default gbt_fireguard.* slot (the live deploy —
+        # see the 2026-07-06 serve-artifact-tagging incident). Keyed off PRODUCTION_FACTOR so bare/production writes
+        # the bare slot and only OTHER resolutions auto-tag. Mirror serve.py.
         tag = f"{factor}km"
-        log.info(f"--factor {factor} without --tag → auto-tagging '{tag}' (production slot protected)")
-    cube_path = CUBE if factor == 4 else T.project_root / "data" / "gold" / f"FireGuard_coarse{factor}.zarr"
+        log.info(f"--factor {factor} != production {grid.PRODUCTION_FACTOR} without --tag → auto-tagging '{tag}' (production slot protected)")
+    cube_path = grid.gold_cube(factor)
     BLK = max(12, int(200 * (factor / 4) ** 2))   # area-scale the time-block load so RAM/block ~constant
                                                   # (4km→200, 2km→50, 1km→12; floor 12 keeps the invariant at 1km)
     lead = int(sys.argv[sys.argv.index("--weather-lead") + 1]) if "--weather-lead" in sys.argv else 0

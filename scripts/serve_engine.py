@@ -30,7 +30,7 @@ from src.data.ingest import grid
 from src.data.ingest import ingest_weather as IW
 from src.data.ingest import ingest_fire as IF
 
-CUBE = grid.ROOT / "data" / "gold" / "FireGuard_coarse2.zarr"   # production grid = 2 km (2026-07-08 cutover)
+CUBE = grid.gold_cube()   # production gold cube (grid.PRODUCTION_FACTOR = 2 km; 2026-07-08 cutover)
 FETCH_STEP = 0.25                                    # native ~0.25°
 BAND_CACHE = grid.ROOT / "data" / "serving_store" / "band_cache"
 REFETCH_RECENT_DAYS = 2   # always re-fetch the newest N band days (Open-Meteo archive is IFS-provisional there and
@@ -115,14 +115,16 @@ def _band_raw(z, band, gx, gy):
         for d, fields in fetched.items():
             day_fields[d] = fields
             if float(fields["is_fire"].sum()) == 0.0:
-                # PLAUSIBILITY GUARD: zero VIIRS detections across the whole Iberia bbox in a day is
-                # essentially impossible (even winter has ag burns) — far more likely a FIRMS outage or an
-                # empty/expired response. Serve degrades gracefully (this run still uses the zeros) but the
-                # day is NOT cached, so it is re-fetched next run instead of poisoning the settled cache.
-                log.warning(f"zero fire detections for {pd.Timestamp(d).date()} across all Iberia — "
-                            f"suspicious (FIRMS outage?); day NOT cached, will refetch next serve")
-                continue
-            np.savez(_cpath(d), **fields)                            # persist for the next serve
+                # PLAUSIBILITY (monitor signal, NOT a cache gate): zero VIIRS detections across the whole Iberia
+                # bbox in a day is suspicious (likely a FIRMS lag/outage). We still CACHE the day — leaving a
+                # settled day uncached would force EVERY later serve to re-fetch the whole widening band (that day
+                # stays in fetch_days forever, so `date_range(min,today)` re-expands to the full band, re-tripping
+                # the Open-Meteo limit the cache exists to avoid). Transient outages self-correct: the
+                # REFETCH_RECENT_DAYS window re-fetches (overwrites) the recent edge before the day settles, and the
+                # FIRMS-key hard-fail in _fetch_days guards *total* blindness. This warning feeds the truth-loop.
+                log.warning(f"zero fire detections for {pd.Timestamp(d).date()} across all Iberia — suspicious "
+                            f"(FIRMS lag/outage?); cached + flagged for monitoring")
+            np.savez(_cpath(d), **fields)                            # ALWAYS persist → fetch_days stays the recent window
 
     raw = {v: np.empty((len(band), NY, NX), np.float32) for v in gold_time}
     for k, d in enumerate(band):
