@@ -83,7 +83,7 @@ python -m venv .venv && source .venv/bin/activate && pip install -r requirements
 - **Run the monitor locally:** `docker-compose up --build` → http://localhost:8501.
 - **Baselines / ablations:** `scripts/experiments/` (`baseline_panel.py`, `fgdc_ablation.py`).
 
-Experiment history is tracked with MLflow (`mlruns/`, local). The forward plan lives in `ROADMAP.md`; the
+Experiment history is tracked with MLflow (`mlruns/`, local). The forward plan lives in `BACKLOG.md`; the
 development log in `CHANGES.md`.
 
 ## Roadmap
@@ -92,7 +92,7 @@ FGDC v2 is the shipped, serving system. The live serve unions **three VIIRS bird
 passes/day)** — each added bird measurably densifies the fire signal (NOAA-20 +57%, NOAA-21 a further +26% cell-days)
 for a consistent next-day-skill lift. Queued directions: fold the multi-satellite label into *training* (currently
 serve-side only), Sentinel-3 SLSTR as a further complementary source, forecast-weather features, and a real-time
-nowcast path. See `ROADMAP.md` and `CHANGES.md`.
+nowcast path. See `BACKLOG.md` and `CHANGES.md`.
 
 ## References
 

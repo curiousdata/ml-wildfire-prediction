@@ -59,7 +59,6 @@ models/*.pth
 # The PRODUCTION gbt_fireguard.* slot IS tracked; regenerate tagged models via train_gbt/calibrate --factor F.
 models/gbt_fireguard_*km.*
 CLAUDE.md
-ROADMAP.md
 .mcp.json
 logs/night_worklog.md
 .env
